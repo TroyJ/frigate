@@ -74,6 +74,13 @@ class RecordExportConfig(FrigateBaseModel):
 
 class RecordConfig(FrigateBaseModel):
     enabled: bool = Field(default=False, title="Enable record on all cameras.")
+    # Fork addition (release/*+troy): free-space floor for the storage maintainer.
+    # Only the global record config is read; per-camera values are ignored.
+    min_disk_free_gb: float = Field(
+        default=0,
+        ge=0,
+        title="Minimum free space (GB) to keep on the recording disk; 0 disables the floor.",
+    )
     sync_recordings: bool = Field(
         default=False, title="Sync recordings with disk on startup and once a day."
     )

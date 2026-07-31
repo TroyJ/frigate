@@ -28,6 +28,10 @@ class StorageMaintainer(threading.Thread):
         self.config = config
         self.stop_event = stop_event
         self.camera_storage_stats: dict[str, dict] = {}
+        # Fork addition: free-space floor from record.min_disk_free_gb (global only).
+        self.min_free_mb: float = config.record.min_disk_free_gb * 1024
+        self.pending_reclaim_mb: float | None = None
+        self.warned_min_free_clamp = False
 
     def calculate_camera_bandwidth(self) -> None:
         """Calculate an average MB/hr for each camera."""
@@ -97,24 +101,53 @@ class StorageMaintainer(threading.Thread):
 
     def check_storage_needs_cleanup(self) -> bool:
         """Return if storage needs cleanup."""
-        # currently runs cleanup if less than 1 hour of space is left
+        # runs cleanup if less than 1 hour of space is left, or if the
+        # free-space floor (record.min_disk_free_gb, fork addition) is breached
         # disk_usage should not spin up disks
         hourly_bandwidth = sum(
             [b["bandwidth"] for b in self.camera_storage_stats.values()]
         )
-        remaining_storage = round(shutil.disk_usage(RECORD_DIR).free / pow(2, 20), 1)
+        usage = shutil.disk_usage(RECORD_DIR)
+        remaining_storage = round(usage.free / pow(2, 20), 1)
+
+        min_free_mb = self.min_free_mb
+        half_total_mb = usage.total / pow(2, 20) / 2
+        if min_free_mb > half_total_mb:
+            if not self.warned_min_free_clamp:
+                logger.warning(
+                    f"record.min_disk_free_gb ({min_free_mb / 1024:.1f} GB) exceeds half the "
+                    f"recording disk ({usage.total / pow(2, 30):.1f} GB total); clamping the "
+                    f"free-space floor to {half_total_mb / 1024:.1f} GB."
+                )
+                self.warned_min_free_clamp = True
+            min_free_mb = half_total_mb
+
+        threshold = max(hourly_bandwidth, min_free_mb)
         logger.debug(
-            f"Storage cleanup check: {hourly_bandwidth} hourly with remaining storage: {remaining_storage}."
+            f"Storage cleanup check: {hourly_bandwidth} hourly with remaining storage: {remaining_storage}, cleanup threshold: {threshold}."
         )
-        return remaining_storage < hourly_bandwidth
+
+        if remaining_storage < threshold:
+            # reclaim enough to get back above the threshold plus one hour of
+            # bandwidth as slack, so the trim does not re-fire on the next check
+            self.pending_reclaim_mb = max(
+                hourly_bandwidth, threshold + hourly_bandwidth - remaining_storage
+            )
+            return True
+
+        return False
 
     def reduce_storage_consumption(self) -> None:
-        """Remove oldest hour of recordings."""
+        """Remove oldest recordings until the reclaim target is met."""
         logger.debug("Starting storage cleanup.")
         deleted_segments_size = 0
         hourly_bandwidth = sum(
             [b["bandwidth"] for b in self.camera_storage_stats.values()]
         )
+        # set by check_storage_needs_cleanup(); falls back to the upstream
+        # behaviour (reclaim one hour of bandwidth) when called directly
+        reclaim_target = self.pending_reclaim_mb or hourly_bandwidth
+        self.pending_reclaim_mb = None
 
         recordings: Recordings = (
             Recordings.select(
@@ -146,8 +179,8 @@ class StorageMaintainer(threading.Thread):
         event_start = 0
         deleted_recordings = []
         for recording in recordings:
-            # check if 1 hour of storage has been reclaimed
-            if deleted_segments_size > hourly_bandwidth:
+            # check if the reclaim target has been met
+            if deleted_segments_size > reclaim_target:
                 break
 
             keep = False
@@ -186,9 +219,9 @@ class StorageMaintainer(threading.Thread):
                     pass
 
         # check if need to delete retained segments
-        if deleted_segments_size < hourly_bandwidth:
+        if deleted_segments_size < reclaim_target:
             logger.error(
-                f"Could not clear {hourly_bandwidth} MB, currently {deleted_segments_size} MB have been cleared. Retained recordings must be deleted."
+                f"Could not clear {reclaim_target} MB, currently {deleted_segments_size} MB have been cleared. Retained recordings must be deleted."
             )
             recordings = (
                 Recordings.select(
@@ -205,7 +238,7 @@ class StorageMaintainer(threading.Thread):
             )
 
             for recording in recordings:
-                if deleted_segments_size > hourly_bandwidth:
+                if deleted_segments_size > reclaim_target:
                     break
 
                 try:
@@ -276,6 +309,13 @@ class StorageMaintainer(threading.Thread):
             logger.info("Safe mode enabled, skipping storage maintenance")
             return
 
+        if self.min_free_mb:
+            logger.info(
+                f"Storage maintainer free-space floor is {self.min_free_mb / 1024:.1f} GB "
+                "(record.min_disk_free_gb); cleanup threshold is the larger of this and "
+                "one hour of recording bandwidth."
+            )
+
         self.calculate_camera_bandwidth()
         while not self.stop_event.wait(300):
             if not self.camera_storage_stats or True in [
@@ -286,7 +326,7 @@ class StorageMaintainer(threading.Thread):
 
             if self.check_storage_needs_cleanup():
                 logger.info(
-                    "Less than 1 hour of recording space left, running storage maintenance..."
+                    "Free space on the recording disk is below the cleanup threshold, running storage maintenance..."
                 )
                 self.reduce_storage_consumption()
 
