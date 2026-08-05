@@ -189,6 +189,20 @@ class NorfairTracker(ObjectTracker):
                     obj_type, tracker_config
                 )
 
+        # Labels with a min_initialized override need their own tracker instance:
+        # initialization_delay is a per-Tracker parameter, and labels without a
+        # dedicated config above would otherwise share the default tracker (and
+        # therefore the camera-level min_initialized).
+        for obj_type in self.detect_config.min_initialized_objects:
+            if obj_type not in self.camera_config.objects.track:
+                continue
+            if obj_type not in self.trackers:
+                self.trackers[obj_type] = {}
+            if "static" not in self.trackers[obj_type]:
+                self.trackers[obj_type]["static"] = self._create_tracker(
+                    obj_type, self.default_tracker_config
+                )
+
         # Initialize default trackers
         self.default_tracker = {
             "static": Tracker(
@@ -216,12 +230,23 @@ class NorfairTracker(ObjectTracker):
                 self.camera_config, self.ptz_metrics
             )
 
+    def _min_initialized(self, obj_type: str) -> int:
+        """Per-label min_initialized, falling back to the camera-level value.
+
+        norfair requires initialization_delay < hit_counter_max, so overrides are
+        clamped to max_disappeared - 1.
+        """
+        value = self.detect_config.min_initialized_objects.get(
+            obj_type, self.detect_config.min_initialized
+        )
+        return min(value, self.detect_config.max_disappeared - 1)
+
     def _create_tracker(self, obj_type: str, tracker_config: dict[str, Any]) -> Tracker:
         """Helper function to create a tracker with given configuration."""
         tracker_params = {
             "distance_function": tracker_config["distance_function"],
             "distance_threshold": tracker_config["distance_threshold"],
-            "initialization_delay": self.detect_config.min_initialized,
+            "initialization_delay": self._min_initialized(obj_type),
             "hit_counter_max": self.detect_config.max_disappeared,
             "filter_factory": tracker_config["filter_factory"],
         }

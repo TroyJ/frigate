@@ -50,6 +50,10 @@ class DetectConfig(FrigateBaseModel):
         default=None,
         title="Minimum number of consecutive hits for an object to be initialized by the tracker.",
     )
+    min_initialized_objects: dict[str, int] = Field(
+        default_factory=dict,
+        title="Object specific overrides for min_initialized.",
+    )
     max_disappeared: Optional[int] = Field(
         default=None,
         title="Maximum number of frames the object can disappear before detection ends.",

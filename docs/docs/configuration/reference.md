@@ -289,6 +289,10 @@ detect:
   fps: 5
   # Optional: Number of consecutive detection hits required for an object to be initialized in the tracker. (default: 1/2 the frame rate)
   min_initialized: 2
+  # Optional: Per-label overrides for min_initialized (fork addition). Labels not listed
+  # use min_initialized. Values are clamped to max_disappeared - 1.
+  min_initialized_objects:
+    motorcycle: 10
   # Optional: Number of frames without a detection before Frigate considers an object to be gone. (default: 5x the frame rate)
   max_disappeared: 25
   # Optional: Configuration for stationary object tracking
