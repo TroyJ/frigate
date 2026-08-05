@@ -45,6 +45,17 @@ DEFAULT_ATTRIBUTE_LABEL_MAP = {
 }
 LABEL_CONSOLIDATION_MAP = {
     "car": 0.8,
+    # Motorcycles fragment the same way large vehicles do: the detector alternates
+    # between a whole-bike box and a box around just the front wheel/fairing, and
+    # at the 0.9 default the fragment is not consolidated away, so it spawns its own
+    # tracked object, event and alert. Measured on entrance_high over 12.4 h: of the
+    # ephemeral objects sitting >=0.8 inside a parked bike's box, 96% were under 60%
+    # of that bike's area, i.e. unambiguous fragments. Over the same window there were
+    # 4 distinct parked locations with up to 4 bikes parked at once, and the worst
+    # overlap between any two *different* bikes was 0.000 -- so 0.8 cannot merge them.
+    # The residual risk is only two bikes occupying near-identical pixels, which did
+    # not occur once in that window.
+    "motorcycle": 0.8,
     "face": 0.5,
 }
 LABEL_CONSOLIDATION_DEFAULT = 0.9
