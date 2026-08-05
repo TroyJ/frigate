@@ -70,6 +70,8 @@ type DraggableGridLayoutProps = {
     React.SetStateAction<{ [key: string]: LivePlayerMode }>
   >;
   resetPreferredLiveMode: (cameraName: string) => void;
+  mseRetryTokens: { [key: string]: number };
+  scheduleMseRetry: (cameraName: string) => void;
   isRestreamedStates: { [key: string]: boolean };
   supportsAudioOutputStates: {
     [key: string]: { supportsAudio: boolean; cameraName: string };
@@ -92,6 +94,8 @@ export default function DraggableGridLayout({
   preferredLiveModes,
   setPreferredLiveModes,
   resetPreferredLiveMode,
+  mseRetryTokens,
+  scheduleMseRetry,
   isRestreamedStates,
   supportsAudioOutputStates,
   streamMetadata,
@@ -642,7 +646,7 @@ export default function DraggableGridLayout({
                   streamMetadata={streamMetadata}
                 >
                   <LivePlayer
-                    key={camera.name}
+                    key={`${camera.name}-${mseRetryTokens[camera.name] ?? 0}`}
                     streamName={streamName}
                     autoLive={autoLive ?? globalAutoLive}
                     showStillWithoutActivity={showStillWithoutActivity ?? true}
@@ -667,15 +671,19 @@ export default function DraggableGridLayout({
                       !isEditMode && onSelectCamera(camera.name);
                     }}
                     onError={(e) => {
-                      setPreferredLiveModes((prevModes) => {
-                        const newModes = { ...prevModes };
-                        if (e === "mse-decode") {
+                      if (e === "mse-decode") {
+                        // browser cannot decode the codec — only a different
+                        // stream type helps
+                        setPreferredLiveModes((prevModes) => {
+                          const newModes = { ...prevModes };
                           newModes[camera.name] = "webrtc";
-                        } else {
-                          newModes[camera.name] = "jsmpeg";
-                        }
-                        return newModes;
-                      });
+                          return newModes;
+                        });
+                      } else {
+                        // troy fork: transient errors retry the HQ stream
+                        // instead of parking the tile in jsmpeg
+                        scheduleMseRetry(camera.name);
+                      }
                     }}
                     onResetLiveMode={() => resetPreferredLiveMode(camera.name)}
                     playAudio={audioStates[camera.name]}

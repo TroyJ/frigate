@@ -1,5 +1,5 @@
 import { CameraConfig, FrigateConfig } from "@/types/frigateConfig";
-import { useCallback, useEffect, useState, useMemo } from "react";
+import { useCallback, useEffect, useState, useMemo, useRef } from "react";
 import useSWR from "swr";
 import { LivePlayerMode } from "@/types/live";
 import useDeferredStreamMetadata from "./use-deferred-stream-metadata";
@@ -50,6 +50,35 @@ export default function useCameraLiveMode(
   const [preferredLiveModes, setPreferredLiveModes] = useState<{
     [key: string]: LivePlayerMode;
   }>({});
+  // troy fork: per-camera retry tokens. Transient MSE errors ("startup",
+  // "stalled") bump a camera's token after 3s; views key the LivePlayer with it
+  // so the player remounts and retries the high-quality stream instead of the
+  // upstream one-strike fallback to jsmpeg. LiveCameraView carries the
+  // single-camera equivalent of this logic.
+  const [mseRetryTokens, setMseRetryTokens] = useState<{
+    [key: string]: number;
+  }>({});
+  const mseRetryTimersRef = useRef<{ [key: string]: number }>({});
+
+  const scheduleMseRetry = useCallback((cameraName: string) => {
+    if (mseRetryTimersRef.current[cameraName] != null) {
+      return;
+    }
+    mseRetryTimersRef.current[cameraName] = window.setTimeout(() => {
+      delete mseRetryTimersRef.current[cameraName];
+      setMseRetryTokens((prev) => ({
+        ...prev,
+        [cameraName]: (prev[cameraName] ?? 0) + 1,
+      }));
+    }, 3000);
+  }, []);
+
+  useEffect(() => {
+    const timers = mseRetryTimersRef.current;
+    return () => {
+      Object.values(timers).forEach((t) => clearTimeout(t));
+    };
+  }, []);
   const [isRestreamedStates, setIsRestreamedStates] = useState<{
     [key: string]: boolean;
   }>({});
@@ -143,6 +172,8 @@ export default function useCameraLiveMode(
     preferredLiveModes,
     setPreferredLiveModes,
     resetPreferredLiveMode,
+    mseRetryTokens,
+    scheduleMseRetry,
     isRestreamedStates,
     supportsAudioOutputStates,
     streamMetadata,

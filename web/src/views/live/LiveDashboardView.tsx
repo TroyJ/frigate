@@ -264,6 +264,8 @@ export default function LiveDashboardView({
     preferredLiveModes,
     setPreferredLiveModes,
     resetPreferredLiveMode,
+    mseRetryTokens,
+    scheduleMseRetry,
     isRestreamedStates,
     supportsAudioOutputStates,
     streamMetadata,
@@ -273,17 +275,20 @@ export default function LiveDashboardView({
 
   const handleError = useCallback(
     (cameraName: string, error: LivePlayerError) => {
-      setPreferredLiveModes((prevModes) => {
-        const newModes = { ...prevModes };
-        if (error === "mse-decode") {
+      if (error === "mse-decode") {
+        // browser cannot decode the codec — only a different stream type helps
+        setPreferredLiveModes((prevModes) => {
+          const newModes = { ...prevModes };
           newModes[cameraName] = "webrtc";
-        } else {
-          newModes[cameraName] = "jsmpeg";
-        }
-        return newModes;
-      });
+          return newModes;
+        });
+      } else {
+        // troy fork: transient errors retry the HQ stream instead of parking
+        // the tile in jsmpeg
+        scheduleMseRetry(cameraName);
+      }
     },
-    [setPreferredLiveModes],
+    [setPreferredLiveModes, scheduleMseRetry],
   );
 
   // audio states
@@ -576,7 +581,7 @@ export default function LiveDashboardView({
                     >
                       <LivePlayer
                         cameraRef={cameraRef}
-                        key={camera.name}
+                        key={`${camera.name}-${mseRetryTokens[camera.name] ?? 0}`}
                         className={`${grow} rounded-lg bg-black md:rounded-2xl`}
                         windowVisible={
                           windowVisible && visibleCameras.includes(camera.name)
@@ -655,6 +660,8 @@ export default function LiveDashboardView({
               preferredLiveModes={preferredLiveModes}
               setPreferredLiveModes={setPreferredLiveModes}
               resetPreferredLiveMode={resetPreferredLiveMode}
+              mseRetryTokens={mseRetryTokens}
+              scheduleMseRetry={scheduleMseRetry}
               isRestreamedStates={isRestreamedStates}
               supportsAudioOutputStates={supportsAudioOutputStates}
               streamMetadata={streamMetadata}
