@@ -267,6 +267,18 @@ export default function LiveCameraView({
   const [webRTC, setWebRTC] = useState(false);
   const [pip, setPip] = useState(false);
   const [lowBandwidth, setLowBandwidth] = useState(false);
+  // troy fork: transient MSE failures retry the high-quality stream (remount via
+  // this token) instead of falling back to jsmpeg; only mse-decode falls back
+  const [mseRetryToken, setMseRetryToken] = useState(0);
+  const mseRetryTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (mseRetryTimerRef.current != null) {
+        clearTimeout(mseRetryTimerRef.current);
+      }
+    };
+  }, []);
 
   const [playInBackground, setPlayInBackground] = useUserPersistence<boolean>(
     `${camera.name}-background-play`,
@@ -427,9 +439,22 @@ export default function LiveCameraView({
           config.go2rtc?.webrtc?.candidates?.length > 0
         ) {
           setWebRTC(true);
-        } else {
+        } else if (e == "mse-decode") {
+          // the browser cannot decode this codec at all — jsmpeg is the only
+          // stream it can render, so the upstream fallback is correct here
           setWebRTC(false);
           setLowBandwidth(true);
+        } else {
+          // troy fork: "startup" and "stalled" are transient (keyframe-alignment
+          // lottery at connect, momentary buffer gaps). Upstream parks the view in
+          // low-res jsmpeg on the first strike; we retry the HQ stream instead.
+          setWebRTC(false);
+          if (mseRetryTimerRef.current == null) {
+            mseRetryTimerRef.current = window.setTimeout(() => {
+              mseRetryTimerRef.current = null;
+              setMseRetryToken((t) => t + 1);
+            }, 3000);
+          }
         }
       }
     },
@@ -642,7 +667,7 @@ export default function LiveCameraView({
                 }}
               >
                 <LivePlayer
-                  key={camera.name}
+                  key={`${camera.name}-${mseRetryToken}`}
                   className={`${fullscreen ? "*:rounded-none" : ""}`}
                   windowVisible
                   showStillWithoutActivity={false}
