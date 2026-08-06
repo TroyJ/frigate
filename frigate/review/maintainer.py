@@ -436,7 +436,16 @@ class ReviewSegmentMaintainer(threading.Thread):
         camera's view, which is the wanted behaviour — it depicts what triggered
         the alert, which is exactly what a detection-free camera cannot show.
         """
-        if not source.has_frame or source.thumb_time == mirror.thumb_time:
+        if not source.has_frame:
+            return
+
+        # `thumb_time` alone cannot be the change key: save_full_frame() (the
+        # no-activity path) sets has_frame without ever setting thumb_time, so a
+        # source thumbnail written that way stays None — equal to a fresh mirror's
+        # None — and would be skipped forever. Gating on the mirror not yet having
+        # a frame makes the first copy unconditional; thumb_time then suppresses
+        # redundant copies on later updates, since update_frame() always stamps it.
+        if mirror.has_frame and source.thumb_time == mirror.thumb_time:
             return
 
         try:

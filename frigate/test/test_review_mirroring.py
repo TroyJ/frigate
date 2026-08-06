@@ -178,6 +178,46 @@ class TestReviewMirroring(unittest.TestCase):
             self.assertTrue(mirror.has_frame)
             self.assertEqual(mirror.thumb_time, 42.0)
 
+    def test_thumb_copied_when_source_thumb_time_is_none(self):
+        """Regression: save_full_frame() sets has_frame but never thumb_time, so a
+        source thumbnail written by the no-activity path stays None — equal to a
+        fresh mirror's None. Gating only on thumb_time skipped the copy forever,
+        leaving mirrored review items with a dangling thumb_path (seen live on
+        entrance_tele, 2026-08-06)."""
+        src, mirror = segment(), segment(camera="tele")
+        with tempfile.TemporaryDirectory() as tmp:
+            src.frame_path = os.path.join(tmp, "src.webp")
+            mirror.frame_path = os.path.join(tmp, "mirror.webp")
+            with open(src.frame_path, "wb") as fh:
+                fh.write(b"fullframe")
+            src.has_frame = True
+            src.thumb_time = None  # exactly what save_full_frame leaves behind
+            self.assertIsNone(mirror.thumb_time)
+
+            self._sync = self.m._sync_mirror_thumb(src, mirror)
+
+            self.assertTrue(os.path.exists(mirror.frame_path))
+            self.assertTrue(mirror.has_frame)
+
+    def test_thumb_not_recopied_when_unchanged(self):
+        """Once synced, an unchanged source must not trigger repeated file copies."""
+        src, mirror = segment(), segment(camera="tele")
+        with tempfile.TemporaryDirectory() as tmp:
+            src.frame_path = os.path.join(tmp, "src.webp")
+            mirror.frame_path = os.path.join(tmp, "mirror.webp")
+            with open(src.frame_path, "wb") as fh:
+                fh.write(b"one")
+            src.has_frame = True
+            src.thumb_time = 10.0
+
+            self.m._sync_mirror_thumb(src, mirror)
+            with open(src.frame_path, "wb") as fh:
+                fh.write(b"two")  # source changed but thumb_time did not
+            self.m._sync_mirror_thumb(src, mirror)
+
+            with open(mirror.frame_path, "rb") as fh:
+                self.assertEqual(fh.read(), b"one")
+
     def test_missing_source_thumb_is_not_fatal(self):
         src, mirror = segment(), segment(camera="tele")
         src.has_frame = True
