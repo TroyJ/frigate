@@ -204,6 +204,8 @@ class NorfairTracker(ObjectTracker):
                 )
 
         # Initialize default trackers
+        # past_detections_length: see _create_tracker — the history must span
+        # the initialization window for register()'s position_changes seed.
         self.default_tracker = {
             "static": Tracker(
                 distance_function=frigate_distance,
@@ -213,6 +215,7 @@ class NorfairTracker(ObjectTracker):
                 initialization_delay=self.detect_config.min_initialized,
                 hit_counter_max=self.detect_config.max_disappeared,  # type: ignore[arg-type]
                 filter_factory=self.default_tracker_config["filter_factory"],  # type: ignore[arg-type]
+                past_detections_length=self.detect_config.min_initialized + 5,  # type: ignore[operator]
             ),
             "ptz": Tracker(
                 distance_function=frigate_distance,
@@ -222,6 +225,7 @@ class NorfairTracker(ObjectTracker):
                 initialization_delay=self.detect_config.min_initialized,
                 hit_counter_max=self.detect_config.max_disappeared,  # type: ignore[arg-type]
                 filter_factory=self.default_ptz_tracker_config["filter_factory"],  # type: ignore[arg-type]
+                past_detections_length=self.detect_config.min_initialized + 5,  # type: ignore[operator]
             ),
         }
 
@@ -243,12 +247,20 @@ class NorfairTracker(ObjectTracker):
 
     def _create_tracker(self, obj_type: str, tracker_config: dict[str, Any]) -> Tracker:
         """Helper function to create a tracker with given configuration."""
+        init_delay = self._min_initialized(obj_type)
         tracker_params = {
             "distance_function": tracker_config["distance_function"],
             "distance_threshold": tracker_config["distance_threshold"],
-            "initialization_delay": self._min_initialized(obj_type),
+            "initialization_delay": init_delay,
             "hit_counter_max": self.detect_config.max_disappeared,
             "filter_factory": tracker_config["filter_factory"],
+            # register()'s position_changes seed reads the pre-initialization
+            # detection history; norfair's default of 4 is shorter than a large
+            # initialization_delay, so the arrival motion could age out of the
+            # kept history before the object surfaces. Size it to cover the
+            # whole initialization window. (The reid update below may override
+            # this for PTZ reid trackers — their delay is small, so that's fine.)
+            "past_detections_length": init_delay + 5,
         }
 
         # Add reid parameters if max_frames is None
@@ -307,6 +319,21 @@ class NorfairTracker(ObjectTracker):
             boxes = [p.data["box"] for p in obj_match.past_detections]
         else:
             boxes = [obj["box"]]
+
+        # If the object moved while the tracker was still initializing, record
+        # that as a real position change. initialization_delay swallows an
+        # arriving object's approach: it surfaces already at rest with
+        # position_changes == 0, and every downstream consumer of that field
+        # (should_retain_recording, should_save_snapshot, the review
+        # maintainer's alert gate) treats it as "was always there" — no clip,
+        # no snapshot, no event, no alert, despite being tracked perfectly.
+        # The pre-initialization detection history proves the arrival, so seed
+        # one position change from it. 0.3 sits between known_active_iou (0.2,
+        # "definitely moved") and the ~0.7+ jitter of a genuinely static
+        # history, so an already-parked object at startup stays at 0 and the
+        # gates keep their no-event-spam-on-restart intent.
+        if len(boxes) >= 2 and intersection_over_union(boxes[0], boxes[-1]) < 0.3:
+            obj["position_changes"] = 1
 
         xmins, ymins, xmaxs, ymaxs = zip(*boxes)
 
