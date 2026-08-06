@@ -30,6 +30,18 @@ class AlertsConfig(FrigateBaseModel):
         default_factory=list,
         title="List of required zones to be entered in order to save the event as an alert.",
     )
+    mirror_from: Union[str, list[str]] = Field(
+        default_factory=list,
+        title="Cameras whose alert review segments are mirrored onto this camera.",
+        description=(
+            "For each named camera, every alert review segment it produces is "
+            "duplicated onto this camera covering the same time window. Lets a "
+            "camera with detection disabled inherit alert-tier recording "
+            "retention from a camera that does run detection, without paying for "
+            "a second detector. Retention, pre_capture and post_capture are this "
+            "camera's own; only the alert window is borrowed."
+        ),
+    )
 
     enabled_in_config: Optional[bool] = Field(
         default=None, title="Keep track of original state of alerts."
@@ -42,6 +54,14 @@ class AlertsConfig(FrigateBaseModel):
     @field_validator("required_zones", mode="before")
     @classmethod
     def validate_required_zones(cls, v):
+        if isinstance(v, str) and "," not in v:
+            return [v]
+
+        return v
+
+    @field_validator("mirror_from", mode="before")
+    @classmethod
+    def validate_mirror_from(cls, v):
         if isinstance(v, str) and "," not in v:
             return [v]
 

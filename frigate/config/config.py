@@ -196,6 +196,36 @@ def verify_valid_live_stream_names(
             )
 
 
+def verify_mirror_from_cameras(
+    frigate_config: FrigateConfig, camera_config: CameraConfig
+) -> None:
+    """Verify review.alerts.mirror_from names other, real, non-mirroring cameras.
+
+    Must run after every camera has been added to frigate_config.cameras, since a
+    camera may legitimately mirror one defined later in the file.
+    """
+    for source in camera_config.review.alerts.mirror_from:
+        if source == camera_config.name:
+            raise ValueError(
+                f"Camera {camera_config.name} lists itself in review.alerts.mirror_from."
+            )
+
+        if source not in frigate_config.cameras:
+            raise ValueError(
+                f"Camera {camera_config.name} has review.alerts.mirror_from camera "
+                f"{source} that is not a valid camera."
+            )
+
+        # Mirrors are never themselves mirrored, so a chain would silently drop
+        # its tail. Reject it rather than half-honour it.
+        if frigate_config.cameras[source].review.alerts.mirror_from:
+            raise ValueError(
+                f"Camera {camera_config.name} mirrors {source}, which itself mirrors "
+                f"another camera. Chained mirroring is not supported; point "
+                f"{camera_config.name} at the originating camera instead."
+            )
+
+
 def verify_recording_segments_setup_with_reasonable_time(
     camera_config: CameraConfig,
 ) -> None:
@@ -688,6 +718,11 @@ class FrigateConfig(FrigateBaseModel):
             verify_motion_and_detect(camera_config)
             verify_objects_track(camera_config, labelmap_objects)
             verify_lpr_and_face(self, camera_config)
+
+        # Cross-camera checks, deliberately after the loop above: self.cameras is
+        # populated as that loop goes, so a camera may reference one defined later.
+        for name, camera_config in self.cameras.items():
+            verify_mirror_from_cameras(self, camera_config)
 
         # set names on classification configs
         for name, config in self.classification.custom.items():

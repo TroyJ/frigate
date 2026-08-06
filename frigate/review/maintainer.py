@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import random
+import shutil
 import string
 import sys
 import threading
@@ -64,6 +65,10 @@ class PendingReviewSegment:
         self.thumb_time: float | None = None
         self.last_alert_time: float | None = None
         self.last_detection_time: float = frame_time
+        # Set only on segments produced by review.alerts.mirror_from: names the
+        # camera this segment was copied from. Mirrors are never themselves
+        # mirrored, so this doubles as the recursion guard.
+        self.mirrored_from: str | None = None
 
         if severity == SeverityEnum.alert:
             self.last_alert_time = frame_time
@@ -136,6 +141,23 @@ class PendingReviewSegment:
             else:
                 end_time = self.last_detection_time
 
+        data = {
+            "detections": list(set(self.detections.keys())),
+            "objects": list(set(self.detections.values())),
+            "verified_objects": [
+                o for o in self.detections.values() if "-verified" in o
+            ],
+            "sub_labels": list(self.sub_labels.values()),
+            "zones": self.zones,
+            "audio": list(self.audio),
+            "thumb_time": self.thumb_time,
+            "metadata": None,
+        }
+
+        # Added only for mirrors, so native segments keep their exact prior shape.
+        if self.mirrored_from:
+            data["mirrored_from"] = self.mirrored_from
+
         return copy.deepcopy(
             {
                 ReviewSegment.id.name: self.id,
@@ -144,18 +166,7 @@ class PendingReviewSegment:
                 ReviewSegment.end_time.name: end_time,
                 ReviewSegment.severity.name: self.severity.value,
                 ReviewSegment.thumb_path.name: self.frame_path,
-                ReviewSegment.data.name: {
-                    "detections": list(set(self.detections.keys())),
-                    "objects": list(set(self.detections.values())),
-                    "verified_objects": [
-                        o for o in self.detections.values() if "-verified" in o
-                    ],
-                    "sub_labels": list(self.sub_labels.values()),
-                    "zones": self.zones,
-                    "audio": list(self.audio),
-                    "thumb_time": self.thumb_time,
-                    "metadata": None,
-                },
+                ReviewSegment.data.name: data,
             }
         )
 
@@ -284,6 +295,13 @@ class ReviewSegmentMaintainer(threading.Thread):
         # manual events
         self.indefinite_events: dict[str, dict[str, Any]] = {}
 
+        # review.alerts.mirror_from fan-out: source camera -> {target camera -> mirror}.
+        # Deliberately NOT stored in active_review_segments: that dict is keyed by
+        # camera and owned by each camera's own detection loop, so putting a mirror
+        # there would collide with a native segment on a camera that both detects
+        # and mirrors.
+        self.mirrored_segments: dict[str, dict[str, PendingReviewSegment]] = {}
+
         # ensure dirs
         Path(os.path.join(CLIPS_DIR, "review")).mkdir(exist_ok=True)
 
@@ -313,6 +331,7 @@ class ReviewSegmentMaintainer(threading.Thread):
         self.requestor.send_data(
             f"{segment.camera}/review_status", segment.severity.value.upper()
         )
+        self._update_mirrored_segments(segment)
 
     def _publish_segment_update(
         self,
@@ -341,6 +360,7 @@ class ReviewSegmentMaintainer(threading.Thread):
         self.requestor.send_data(
             f"{segment.camera}/review_status", segment.severity.value.upper()
         )
+        self._update_mirrored_segments(segment)
 
     def _publish_segment_end(
         self,
@@ -362,7 +382,12 @@ class ReviewSegmentMaintainer(threading.Thread):
         )
         self.review_publisher.publish(review_update, segment.camera)
         self.requestor.send_data(f"{segment.camera}/review_status", "NONE")
-        self.active_review_segments[segment.camera] = None
+
+        # A mirror does not own its camera's active slot, so it must not clear it.
+        if not segment.mirrored_from:
+            self.active_review_segments[segment.camera] = None
+            self._end_mirrored_segments(segment)
+
         return end_time
 
     def forcibly_end_segment(self, camera: str) -> float:
@@ -371,6 +396,112 @@ class ReviewSegmentMaintainer(threading.Thread):
         if segment:
             prev_data = segment.get_data(False)
             return self._publish_segment_end(segment, prev_data)
+
+    def _mirror_targets(self, source_camera: str) -> list[str]:
+        """Cameras currently eligible to mirror source_camera's alert segments.
+
+        Scanned on demand rather than cached as a reverse map:
+        CameraConfigUpdateSubscriber mutates self.config in place, so a cached map
+        would go stale on a config update, and the scan is trivial at any realistic
+        camera count.
+        """
+        targets: list[str] = []
+
+        for name, camera in self.config.cameras.items():
+            if name == source_camera:
+                continue
+
+            if source_camera not in camera.review.alerts.mirror_from:
+                continue
+
+            # Same gates the run loop applies to a camera's own segments.
+            if not camera.enabled or not camera.record.enabled:
+                continue
+
+            if not camera.review.alerts.enabled:
+                continue
+
+            targets.append(name)
+
+        return targets
+
+    def _sync_mirror_thumb(
+        self, source: PendingReviewSegment, mirror: PendingReviewSegment
+    ) -> None:
+        """Give the mirror its own copy of the source's thumbnail.
+
+        Copied, not shared: cleanup.py unlinks thumb_path when a review segment
+        expires, so two rows pointing at one file would leave a dangling reference
+        as soon as the first of them expired. The thumbnail shows the *source*
+        camera's view, which is the wanted behaviour — it depicts what triggered
+        the alert, which is exactly what a detection-free camera cannot show.
+        """
+        if not source.has_frame or source.thumb_time == mirror.thumb_time:
+            return
+
+        try:
+            shutil.copyfile(source.frame_path, mirror.frame_path)
+        except OSError as e:
+            logger.debug(f"Could not mirror review thumbnail for {mirror.camera}: {e}")
+            return
+
+        mirror.has_frame = True
+        mirror.thumb_time = source.thumb_time
+
+    def _update_mirrored_segments(self, source: PendingReviewSegment) -> None:
+        """Fan an alert segment out onto the cameras configured to mirror it."""
+        # Mirrors are never themselves mirrored (guards recursion, since this runs
+        # from the same _publish_* methods used to emit mirrors), and only alerts
+        # are mirrored — review.alerts.mirror_from says nothing about detections.
+        if source.mirrored_from or source.severity != SeverityEnum.alert:
+            return
+
+        mirrors = self.mirrored_segments.setdefault(source.camera, {})
+
+        for target in self._mirror_targets(source.camera):
+            mirror = mirrors.get(target)
+
+            if mirror is None:
+                mirror = PendingReviewSegment(
+                    target,
+                    # The SOURCE's start_time, not now: a segment that escalated
+                    # from detection to alert must still protect its whole window.
+                    source.start_time,
+                    SeverityEnum.alert,
+                    dict(source.detections),
+                    sub_labels=dict(source.sub_labels),
+                    # Zones belong to the source camera's coordinate space and
+                    # mean nothing on this one.
+                    zones=[],
+                    audio=set(source.audio),
+                )
+                mirror.mirrored_from = source.camera
+                mirror.last_alert_time = source.last_alert_time
+                mirror.last_detection_time = source.last_detection_time
+                mirrors[target] = mirror
+                self._sync_mirror_thumb(source, mirror)
+                self._publish_segment_start(mirror)
+                continue
+
+            prev_data = mirror.get_data(False)
+            mirror.detections = dict(source.detections)
+            mirror.sub_labels = dict(source.sub_labels)
+            mirror.audio = set(source.audio)
+            mirror.last_alert_time = source.last_alert_time
+            mirror.last_detection_time = source.last_detection_time
+            self._sync_mirror_thumb(source, mirror)
+            self._publish_segment_update(
+                mirror, self.config.cameras[target], None, [], prev_data
+            )
+
+    def _end_mirrored_segments(self, source: PendingReviewSegment) -> None:
+        """End every mirror of a source segment, matching its end time."""
+        for mirror in self.mirrored_segments.pop(source.camera, {}).values():
+            prev_data = mirror.get_data(False)
+            mirror.last_alert_time = source.last_alert_time
+            mirror.last_detection_time = source.last_detection_time
+            self._sync_mirror_thumb(source, mirror)
+            self._publish_segment_end(mirror, prev_data)
 
     def update_existing_segment(
         self,
