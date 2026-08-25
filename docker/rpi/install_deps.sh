@@ -22,13 +22,11 @@ echo "deb http://deb.debian.org/debian bookworm main contrib non-free non-free-f
 apt update
 
 # ffmpeg -> arm64
+# The rpi-tuned ffmpeg is built from source in the rpi-ffmpeg-build stage
+# (docker/rpi/build_ffmpeg.sh) and copied into /usr/lib/ffmpeg/rpi; the Pi APT
+# package (5.1.9+rpt1) is too old for kernel 6.18's HEVC driver. Install its
+# runtime dependencies here.
 if [[ "${TARGETARCH}" == "arm64" ]]; then
-    # add raspberry pi repo
-    gpg --no-default-keyring --keyring /usr/share/keyrings/raspbian.gpg --keyserver keyserver.ubuntu.com --recv-keys 82B129927FA3303E
-    echo "deb [signed-by=/usr/share/keyrings/raspbian.gpg] https://archive.raspberrypi.org/debian/ bookworm main" | tee /etc/apt/sources.list.d/raspi.list
-    apt-get -qq update
-    apt-get -qq install --no-install-recommends --no-install-suggests -y ffmpeg
-    mkdir -p /usr/lib/ffmpeg/rpi/bin
-    ln -svf /usr/bin/ffmpeg /usr/lib/ffmpeg/rpi/bin/ffmpeg
-    ln -svf /usr/bin/ffprobe /usr/lib/ffmpeg/rpi/bin/ffprobe
+    apt-get -qq install --no-install-recommends --no-install-suggests -y \
+        libx264-164 libopus0 libv4l-0 libdrm2 libudev1 libssl3
 fi
