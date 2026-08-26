@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ReviewSegment } from "@/types/review";
-import { mergeReviews, ReviewPage } from "../store";
+import { mergeReviews, retirePatches, ReviewPage } from "../store";
 
 const mk = (id: string, start: number, reviewed = false): ReviewSegment =>
   ({
@@ -83,5 +83,55 @@ describe("mergeReviews", () => {
     expect(
       mergeReviews(refetched, new Map(), new Set(["b"])).map((r) => r.id),
     ).toEqual(["a", "c"]);
+  });
+});
+
+describe("retirePatches", () => {
+  it("drops a patch the refetched page agrees with", () => {
+    const patches = new Map([["a", { has_been_reviewed: true }]]);
+    const out = retirePatches(patches, [mk("a", 300, true)]);
+    expect(out.has("a")).toBe(false);
+  });
+
+  it("keeps a patch the server has not caught up with yet", () => {
+    const patches = new Map([["a", { has_been_reviewed: true }]]);
+    const out = retirePatches(patches, [mk("a", 300, false)]);
+    expect(out.get("a")).toEqual({ has_been_reviewed: true });
+  });
+
+  it("keeps a patch for an id the page did not return", () => {
+    const patches = new Map([["a", { has_been_reviewed: true }]]);
+    const out = retirePatches(patches, [mk("b", 200, true)]);
+    expect(out.has("a")).toBe(true);
+  });
+
+  it("returns the same map identity when nothing was retired", () => {
+    // `reviews` is a useMemo keyed on this identity — a fresh copy on every 30 s tail
+    // refetch would re-merge the whole list for no reason.
+    const patches = new Map([["a", { has_been_reviewed: true }]]);
+    expect(retirePatches(patches, [mk("a", 300, false)])).toBe(patches);
+    expect(retirePatches(new Map(), [mk("a", 300, true)])).toBeInstanceOf(Map);
+  });
+
+  it("only compares the patched keys, not the whole segment", () => {
+    // the page's copy differs in end_time (the review closed) but agrees on the patch
+    const patches = new Map([["a", { has_been_reviewed: true }]]);
+    const server = { ...mk("a", 300, true), end_time: 999 } as ReviewSegment;
+    expect(retirePatches(patches, [server]).has("a")).toBe(false);
+  });
+
+  it("a retired patch stops masking the server value in mergeReviews", () => {
+    // the whole point: after retirement a change made elsewhere shows through
+    let patches: Map<string, Partial<ReviewSegment>> = new Map([
+      ["a", { has_been_reviewed: true }],
+    ]);
+    patches = retirePatches(patches, [mk("a", 300, true)]);
+    const later = mergeReviews(
+      [page([mk("a", 300, false)])],
+      new Map(),
+      new Set(),
+      patches,
+    );
+    expect(later[0].has_been_reviewed).toBe(false);
   });
 });

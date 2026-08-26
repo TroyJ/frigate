@@ -197,6 +197,8 @@ export function ContinuousMotionStrip({
     [ctx, surface, startAligned, segmentDuration, count, win],
   );
 
+  // The effect RETURNS the disposer: on unmount (a Review tab switch) the entry has to
+  // leave the map, or a stale `false` latches the "N new" chip on forever (§9.3).
   const reportAtTop = ctx.reportAtTop;
   useEffect(
     () => reportAtTop(surface, win.stickToTop),

@@ -208,15 +208,21 @@ export function ContinuousReviewGrid({
 
   // §9.3: pinned to the newest edge? The chip is meaningless there and the provider clears
   // its counter. STICK_THRESHOLD is in useItemWindow; one card height is far too coarse.
+  // The cleanup also FORGETS the surface: on unmount (a Review tab switch) a stale entry
+  // would latch `allAtTop` off for the rest of the session and the chip with it.
   const reportAtTop = ctx.reportAtTop;
+  const forgetSurface = ctx.forgetSurface;
   useEffect(() => {
     const el = contentRef.current;
     if (!el) return;
     const onScroll = () => reportAtTop("grid", el.scrollTop < 24);
     onScroll();
     el.addEventListener("scroll", onScroll, { passive: true });
-    return () => el.removeEventListener("scroll", onScroll);
-  }, [contentRef, reportAtTop, items.length]);
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      forgetSurface("grid");
+    };
+  }, [contentRef, reportAtTop, forgetSurface, items.length]);
 
   // --- navigation registry (§2A.3 / D14) ---------------------------------------------
   useEffect(

@@ -38,7 +38,12 @@ import { useTimezone } from "@/hooks/use-date-utils";
 import { useFrigateReviews } from "@/api/ws";
 import { useContinuousEnabled } from "./useContinuousEnabled";
 import { FetchQueue, isAbort } from "./fetchQueue";
-import { ReviewPage, mergeReviews, groupByCamera } from "./store";
+import {
+  ReviewPage,
+  mergeReviews,
+  groupByCamera,
+  retirePatches,
+} from "./store";
 import { matchesFilter } from "./filterMatch";
 import { usePlaybackChunks } from "./usePlaybackChunks";
 import {
@@ -94,8 +99,18 @@ export type ContinuousContextValue = {
   playhead?: number;
   /** Tell the provider where the player is, so the chunk window can follow it (§9.5). */
   reportPlayhead: (t: number) => void;
-  /** Tell the provider whether the active surface is pinned to the newest edge (§9.3). */
-  reportAtTop: (surface: SurfaceName, atTop: boolean) => void;
+  /**
+   * Tell the provider whether the active surface is pinned to the newest edge (§9.3).
+   * Returns a disposer the caller MUST use as its effect cleanup — see `forgetSurface`.
+   */
+  reportAtTop: (surface: SurfaceName, atTop: boolean) => () => void;
+  /**
+   * Drop a surface's entry entirely, for when it unmounts (§9.3).
+   *
+   * Not the same as reporting `true`: an unmounted surface has no opinion about the
+   * newest edge, and leaving a stale `false` behind latches `allAtTop` off forever.
+   */
+  forgetSurface: (surface: SurfaceName) => void;
   /** Jump the active surface to the newest edge. */
   scrollToTop: () => void;
   registerSurface: (name: SurfaceName, api: SurfaceApi) => () => void;
@@ -214,6 +229,11 @@ export function ContinuousProvider({ filter, children }: Props) {
     setPages(new Map());
     setOverrides(new Map());
     setPatches(new Map());
+    // The chip counts items for the OLD filter. Left standing it announces arrivals that
+    // the new filter may exclude, and `seenNew` would suppress a genuine re-announcement
+    // of the same id once it matches again.
+    seenNew.current.clear();
+    setPendingNew(0);
     setOldest(floorHourInTz(Math.floor(Date.now() / 1000) - INITIAL_SPAN, tz));
   }, [filterKey, reviewQueue, heavyQueue, tz]);
 
@@ -247,6 +267,10 @@ export function ContinuousProvider({ filter, children }: Props) {
             next.set(after, { after, before, status: "done", items });
             return next;
           });
+          // A patch is a local truth the server has not echoed yet, so it must be RETIRED
+          // once the server agrees — otherwise it masks that field for the rest of the
+          // session (see `retirePatches`).
+          setPatches((prev) => retirePatches(prev, items));
         })
         .catch((e) => {
           if (isAbort(e)) {
@@ -353,11 +377,28 @@ export function ContinuousProvider({ filter, children }: Props) {
   const [atTopBySurface, setAtTopBySurface] = useState<
     Partial<Record<SurfaceName, boolean>>
   >({});
-  const reportAtTop = useCallback((surface: SurfaceName, v: boolean) => {
-    setAtTopBySurface((prev) =>
-      prev[surface] === v ? prev : { ...prev, [surface]: v },
-    );
+  // The entry must also be REMOVED when the surface unmounts, which is why `reportAtTop`
+  // hands back a disposer. The Review tabs are mutually exclusive mounts under one
+  // provider, so an ordinary tab switch retires a surface: leaving its last `false` behind
+  // held `allAtTop` off for the rest of the session, and the chip then appeared on every
+  // arrival while the user sat pinned at now, with nothing able to clear it.
+  const forgetSurface = useCallback((surface: SurfaceName) => {
+    setAtTopBySurface((prev) => {
+      if (!(surface in prev)) return prev;
+      const next = { ...prev };
+      delete next[surface];
+      return next;
+    });
   }, []);
+  const reportAtTop = useCallback(
+    (surface: SurfaceName, v: boolean) => {
+      setAtTopBySurface((prev) =>
+        prev[surface] === v ? prev : { ...prev, [surface]: v },
+      );
+      return () => forgetSurface(surface);
+    },
+    [forgetSurface],
+  );
   /** True when every mounted surface is pinned to now — nothing to announce anywhere. */
   const allAtTop = useMemo(() => {
     const values = Object.values(atTopBySurface);
@@ -420,7 +461,8 @@ export function ContinuousProvider({ filter, children }: Props) {
    * `has_been_reviewed`: folding it in meant the next message for that id silently
    * un-reviewed a card the user had just marked, and it reappeared in the grid.
    * `mergeReviews` applies patches last, so the local truth survives until a page refetch
-   * agrees with it.
+   * agrees with it — at which point `fetchPage` retires the patch, so the server is the
+   * source of truth again and a change made elsewhere is not masked for the session.
    */
   const [patches, setPatches] = useState<Map<string, Partial<ReviewSegment>>>(
     () => new Map(),
@@ -544,6 +586,7 @@ export function ContinuousProvider({ filter, children }: Props) {
       playhead,
       reportPlayhead,
       reportAtTop,
+      forgetSurface,
       scrollToTop,
       registerSurface,
       navigateToTime,
@@ -572,6 +615,7 @@ export function ContinuousProvider({ filter, children }: Props) {
       playhead,
       reportPlayhead,
       reportAtTop,
+      forgetSurface,
       scrollToTop,
       registerSurface,
       navigateToTime,

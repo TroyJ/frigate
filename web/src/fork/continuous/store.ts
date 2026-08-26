@@ -44,8 +44,10 @@ export type HeavyPage = {
  * `patches` must come LAST. A WS `update`/`end`/`genai` carries the whole segment and does
  * NOT carry `has_been_reviewed`, so replacing wholesale un-reviewed a card the user had
  * just marked — it reappeared in a `showReviewed = false` grid seconds later. Keeping the
- * local patch on top fixes that, and it is dropped once a refetched page agrees (the
- * provider clears a patch when the page value matches it).
+ * local patch on top fixes that, and it is dropped once a refetched page agrees — the
+ * retirement is `retirePatches` below, called from the provider's `fetchPage` `.then`:
+ * it deletes a patch whose every key already matches the item the server just returned.
+ * Without that step a patched id masks the server's value for the whole session.
  */
 export function mergeReviews(
   pages: Iterable<ReviewPage>,
@@ -68,6 +70,38 @@ export function mergeReviews(
   const out = [...byId.values()];
   out.sort((a, b) => b.start_time - a.start_time);
   return out;
+}
+
+/**
+ * Drop every patch the server has caught up with (§14.4).
+ *
+ * A patch is a local truth that has not been echoed back yet, and `mergeReviews` applies it
+ * LAST — so a patch that is never retired masks that field for the rest of the session, and
+ * a change made anywhere else (another tab, a phone, the API) can never show through.
+ * Only the patched keys are compared, which keeps this independent of what
+ * `Partial<ReviewSegment>` grows to hold.
+ *
+ * Returns the SAME map when nothing was retired: `reviews` is a useMemo keyed on this
+ * identity, so returning a fresh copy on every tail-poll refetch would re-merge the whole
+ * list 30 s.
+ */
+export function retirePatches(
+  patches: Map<string, Partial<ReviewSegment>>,
+  items: ReviewSegment[],
+): Map<string, Partial<ReviewSegment>> {
+  if (patches.size === 0) return patches;
+  let next: Map<string, Partial<ReviewSegment>> | undefined;
+  for (const item of items) {
+    const patch = patches.get(item.id);
+    if (!patch) continue;
+    const agreed = Object.entries(patch).every(
+      ([k, v]) => item[k as keyof ReviewSegment] === v,
+    );
+    if (!agreed) continue;
+    next ??= new Map(patches);
+    next.delete(item.id);
+  }
+  return next ?? patches;
 }
 
 export function groupByCamera(

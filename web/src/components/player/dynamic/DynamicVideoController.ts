@@ -113,8 +113,8 @@ export class DynamicVideoController {
       // first frame of the hour) and leaving it paused reads as a broken player.
       //
       // `play()` directly, NOT `waitAndPlay()`: that helper waits for a `seeked` event, and
-      // this branch performs no seek — `currentTime` is already 0 — so the listener would
-      // never fire and the player would stay paused anyway.
+      // this branch writes no `currentTime` at all, so nothing guarantees one is coming —
+      // the listener could sit there unfired and leave the player paused.
       this.playerController.play();
     }
   }
