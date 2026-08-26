@@ -25,6 +25,7 @@ import {
   ZoomLevel,
 } from "@/types/review";
 import { getChunkedTimeDay } from "@/utils/timelineUtil";
+import { ContinuousTimelinePanel, useContinuous } from "@/fork/continuous";
 import {
   MutableRefObject,
   useCallback,
@@ -158,9 +159,15 @@ export function RecordingView({
     recording?.timelineType ?? "timeline",
   );
 
+  // fork (continuous timeline, F1): when the fork panel is enabled the provider supplies
+  // hourly playback chunks over the whole retained range; upstream's getChunkedTimeDay
+  // would hand nginx-vod-module a multi-day playlist once the window exceeds 24 h.
+  const continuous = useContinuous();
   const chunkedTimeRange = useMemo(
-    () => getChunkedTimeDay(timeRange),
-    [timeRange],
+    () =>
+      continuous.enabled ? continuous.chunks : getChunkedTimeDay(timeRange),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [timeRange, continuous.enabled, continuous.enabled && continuous.chunks],
   );
   const [selectedRangeIdx, setSelectedRangeIdx] = useState(
     chunkedTimeRange.findIndex((chunk) => {
@@ -521,7 +528,8 @@ export function RecordingView({
   );
 
   const activeReviewItem = useMemo(() => {
-    if (!config?.cameras?.[mainCamera].review.genai?.enabled_in_config) {
+    // fork (F15/D9): the camera may have left the config — must not throw
+    if (!config?.cameras?.[mainCamera]?.review.genai?.enabled_in_config) {
       return undefined;
     }
 
@@ -836,25 +844,48 @@ export function RecordingView({
               )}
             </div>
           </div>
-          <Timeline
-            contentRef={contentRef}
-            mainCamera={mainCamera}
-            timelineType={
-              (exportRange == undefined ? timelineType : "timeline") ??
-              "timeline"
-            }
-            timeRange={timeRange}
-            mainCameraReviewItems={mainCameraReviewItems}
-            activeReviewItem={activeReviewItem}
-            currentTime={currentTime}
-            exportRange={exportMode == "timeline" ? exportRange : undefined}
-            setCurrentTime={setCurrentTime}
-            manuallySetCurrentTime={manuallySetCurrentTime}
-            setScrubbing={setScrubbing}
-            setExportRange={setExportRange}
-            onAnalysisOpen={onAnalysisOpen}
-            isPlaying={mainControllerRef?.current?.isPlaying() ?? false}
-          />
+          {/* fork (continuous timeline seam, handover §8.1) */}
+          {continuous.enabled ? (
+            <ContinuousTimelinePanel
+              contentRef={contentRef}
+              mainCamera={mainCamera}
+              timelineType={
+                (exportRange == undefined ? timelineType : "timeline") ??
+                "timeline"
+              }
+              timeRange={timeRange}
+              mainCameraReviewItems={mainCameraReviewItems}
+              activeReviewItem={activeReviewItem}
+              currentTime={currentTime}
+              exportRange={exportMode == "timeline" ? exportRange : undefined}
+              setCurrentTime={setCurrentTime}
+              manuallySetCurrentTime={manuallySetCurrentTime}
+              setScrubbing={setScrubbing}
+              setExportRange={setExportRange}
+              onAnalysisOpen={onAnalysisOpen}
+              isPlaying={mainControllerRef?.current?.isPlaying() ?? false}
+            />
+          ) : (
+            <Timeline
+              contentRef={contentRef}
+              mainCamera={mainCamera}
+              timelineType={
+                (exportRange == undefined ? timelineType : "timeline") ??
+                "timeline"
+              }
+              timeRange={timeRange}
+              mainCameraReviewItems={mainCameraReviewItems}
+              activeReviewItem={activeReviewItem}
+              currentTime={currentTime}
+              exportRange={exportMode == "timeline" ? exportRange : undefined}
+              setCurrentTime={setCurrentTime}
+              manuallySetCurrentTime={manuallySetCurrentTime}
+              setScrubbing={setScrubbing}
+              setExportRange={setExportRange}
+              onAnalysisOpen={onAnalysisOpen}
+              isPlaying={mainControllerRef?.current?.isPlaying() ?? false}
+            />
+          )}
         </div>
       </div>
     </DetailStreamProvider>

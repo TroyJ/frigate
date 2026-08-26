@@ -28,7 +28,11 @@ import {
 } from "@/components/ui/hover-card";
 import { HoverCardPortal } from "@radix-ui/react-hover-card";
 import scrollIntoView from "scroll-into-view-if-needed";
-import { MinimapBounds, Tick, Timestamp } from "@/components/timeline/segment-metadata";
+import {
+  MinimapBounds,
+  Tick,
+  Timestamp,
+} from "@/components/timeline/segment-metadata";
 import useTapUtils from "@/hooks/use-tap-utils";
 import ReviewCard from "@/components/card/ReviewCard";
 

@@ -15,7 +15,11 @@ import { useTimelineUtils } from "@/hooks/use-timeline-utils";
 import { useEventSegmentUtils } from "./use-event-segment-utils";
 import { ReviewSegment } from "@/types/review";
 import React, { useCallback, useEffect, useMemo, useRef } from "react";
-import { MinimapBounds, Tick, Timestamp } from "@/components/timeline/segment-metadata";
+import {
+  MinimapBounds,
+  Tick,
+  Timestamp,
+} from "@/components/timeline/segment-metadata";
 import { useMotionSegmentUtils } from "@/hooks/use-motion-segment-utils";
 import { isMobile } from "react-device-detect";
 import useTapUtils from "@/hooks/use-tap-utils";

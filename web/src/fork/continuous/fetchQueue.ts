@@ -112,6 +112,8 @@ export function isAbort(e: unknown): boolean {
   return (
     axios.isCancel(e) ||
     (e instanceof DOMException && e.name === "AbortError") ||
-    (typeof e === "object" && e !== null && (e as { code?: string }).code === "ERR_CANCELED")
+    (typeof e === "object" &&
+      e !== null &&
+      (e as { code?: string }).code === "ERR_CANCELED")
   );
 }

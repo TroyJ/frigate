@@ -44,7 +44,8 @@ export function buildSegmentEventIndex(
     }
     const start = Math.floor(e.start_time / segmentDuration) * segmentDuration;
     const end =
-      Math.floor(e.end_time / segmentDuration) * segmentDuration + segmentDuration;
+      Math.floor(e.end_time / segmentDuration) * segmentDuration +
+      segmentDuration;
     for (let t = start; t < end; t += segmentDuration) {
       const bucket = closed.get(t);
       if (bucket) bucket.push(e);

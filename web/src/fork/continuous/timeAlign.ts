@@ -98,7 +98,8 @@ export function pagesFor(
   const out: Page[] = [];
   // grid origin: the hour floor of `after`, snapped to the span grid relative to a tz day
   const dayStart = startOfDayInTz(after, tz);
-  let cursor = dayStart + Math.floor((floorHourInTz(after, tz) - dayStart) / span) * span;
+  let cursor =
+    dayStart + Math.floor((floorHourInTz(after, tz) - dayStart) / span) * span;
   while (cursor < before) {
     out.push({ after: cursor, before: cursor + span });
     cursor += span;

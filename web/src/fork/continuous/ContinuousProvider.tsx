@@ -28,7 +28,11 @@ import {
 import axios from "axios";
 import useSWR from "swr";
 import { FrigateConfig } from "@/types/frigateConfig";
-import { ReviewSegment, RecordingsSummary, ReviewSummary } from "@/types/review";
+import {
+  ReviewSegment,
+  RecordingsSummary,
+  ReviewSummary,
+} from "@/types/review";
 import { TimeRange } from "@/types/timeline";
 import { useTimezone } from "@/hooks/use-date-utils";
 import { useFrigateReviews } from "@/api/ws";
@@ -45,7 +49,13 @@ import {
   pagesFor,
 } from "./timeAlign";
 
-export type SurfaceName = "timeline" | "events" | "detail" | "grid" | "strip" | "motion";
+export type SurfaceName =
+  | "timeline"
+  | "events"
+  | "detail"
+  | "grid"
+  | "strip"
+  | "motion";
 
 export type SurfaceApi = {
   /** Scroll so `t` is in view; select `selectId` if given. */
@@ -105,7 +115,8 @@ type Props = {
 export function ContinuousProvider({ filter, children }: Props) {
   const [enabled] = useContinuousEnabled();
   const { data: config } = useSWR<FrigateConfig>("config");
-  const tz = useTimezone(config) ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const tz =
+    useTimezone(config) ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
 
   const filterKey = `${filter.cameras ?? ""}|${filter.labels ?? ""}|${filter.zones ?? ""}`;
 
@@ -121,7 +132,10 @@ export function ContinuousProvider({ filter, children }: Props) {
   }, []);
 
   // ---- window ----------------------------------------------------------------------
-  const newest = useMemo(() => alignUp(now, EDGE_ALIGN) + 2 * EDGE_ALIGN, [now]);
+  const newest = useMemo(
+    () => alignUp(now, EDGE_ALIGN) + 2 * EDGE_ALIGN,
+    [now],
+  );
   const [oldest, setOldest] = useState(() =>
     floorHourInTz(Math.floor(Date.now() / 1000) - INITIAL_SPAN, tz),
   );
@@ -129,18 +143,27 @@ export function ContinuousProvider({ filter, children }: Props) {
   // ---- extents (D2 / §14.2): stop on the summaries, never on an empty page --------
   const { data: reviewSummary } = useSWR<ReviewSummary>([
     "review/summary",
-    { timezone: tz, cameras: filter.cameras ?? null, labels: filter.labels ?? null, zones: filter.zones ?? null },
+    {
+      timezone: tz,
+      cameras: filter.cameras ?? null,
+      labels: filter.labels ?? null,
+      zones: filter.zones ?? null,
+    },
   ]);
   const { data: recordingsSummary } = useSWR<RecordingsSummary>([
     "recordings/summary",
     { timezone: tz, cameras: filter.cameras ?? null },
   ]);
   const extent = useMemo(() => {
-    const days = Object.keys(reviewSummary ?? {}).filter((k) => k !== "last24Hours").sort();
+    const days = Object.keys(reviewSummary ?? {})
+      .filter((k) => k !== "last24Hours")
+      .sort();
     const recDays = Object.keys(recordingsSummary ?? {}).sort();
     return {
       oldestReview: days.length ? dayKeyToStartInTz(days[0], tz) : undefined,
-      oldestRecording: recDays.length ? dayKeyToStartInTz(recDays[0], tz) : undefined,
+      oldestRecording: recDays.length
+        ? dayKeyToStartInTz(recDays[0], tz)
+        : undefined,
     };
   }, [reviewSummary, recordingsSummary, tz]);
   const floor = useMemo(() => {
@@ -157,7 +180,9 @@ export function ContinuousProvider({ filter, children }: Props) {
   const reviewQueue = useRef(new FetchQueue(2)).current;
   const heavyQueue = useRef(new FetchQueue(1)).current;
   const [pages, setPages] = useState<Map<number, ReviewPage>>(new Map());
-  const [overrides, setOverrides] = useState<Map<string, ReviewSegment>>(new Map());
+  const [overrides, setOverrides] = useState<Map<string, ReviewSegment>>(
+    new Map(),
+  );
   const [removed] = useState<Set<string>>(new Set());
   const pageHours = useRef(REVIEW_PAGE_HOURS_FAST);
 
@@ -176,24 +201,27 @@ export function ContinuousProvider({ filter, children }: Props) {
   const fetchPage = useCallback(
     (after: number, before: number, force = false) =>
       reviewQueue
-        .enqueue(`review:${filterKey}:${after}${force ? ":" + before : ""}`, async (signal) => {
-          const t0 = performance.now();
-          const res = await axios.get<ReviewSegment[]>("review", {
-            params: {
-              cameras: filter.cameras,
-              labels: filter.labels,
-              zones: filter.zones,
-              reviewed: null,
-              before,
-              after,
-            },
-            signal,
-          });
-          if (performance.now() - t0 > SLOW_PAGE_MS) {
-            pageHours.current = REVIEW_PAGE_HOURS_SLOW;
-          }
-          return res.data;
-        })
+        .enqueue(
+          `review:${filterKey}:${after}${force ? ":" + before : ""}`,
+          async (signal) => {
+            const t0 = performance.now();
+            const res = await axios.get<ReviewSegment[]>("review", {
+              params: {
+                cameras: filter.cameras,
+                labels: filter.labels,
+                zones: filter.zones,
+                reviewed: null,
+                before,
+                after,
+              },
+              signal,
+            });
+            if (performance.now() - t0 > SLOW_PAGE_MS) {
+              pageHours.current = REVIEW_PAGE_HOURS_SLOW;
+            }
+            return res.data;
+          },
+        )
         .then((items) => {
           setPages((prev) => {
             const next = new Map(prev);
@@ -222,7 +250,12 @@ export function ContinuousProvider({ filter, children }: Props) {
         const have = prev.get(p.after);
         if (!have) {
           next ??= new Map(prev);
-          next.set(p.after, { after: p.after, before: p.before, status: "loading", items: [] });
+          next.set(p.after, {
+            after: p.after,
+            before: p.before,
+            status: "loading",
+            items: [],
+          });
           pending.push(fetchPage(p.after, p.before));
         }
       }
@@ -245,7 +278,10 @@ export function ContinuousProvider({ filter, children }: Props) {
   const loadOlder = useCallback(() => {
     setOldest((prev) => {
       if (prev <= floor) return prev;
-      return Math.max(floor, floorHourInTz(prev - pageHours.current * HOUR, tz));
+      return Math.max(
+        floor,
+        floorHourInTz(prev - pageHours.current * HOUR, tz),
+      );
     });
   }, [floor, tz]);
 
@@ -305,7 +341,10 @@ export function ContinuousProvider({ filter, children }: Props) {
 
   // ---- playback chunks (F1) ------------------------------------------------------
   const chunkOrigin = useRef<number>();
-  chunkOrigin.current ??= floorHourInTz(now - RETENTION_FALLBACK_DAYS * DAY, tz);
+  chunkOrigin.current ??= floorHourInTz(
+    now - RETENTION_FALLBACK_DAYS * DAY,
+    tz,
+  );
   const chunks = useMemo<TimeRange[]>(() => {
     const out: TimeRange[] = [];
     let start = chunkOrigin.current!;
@@ -316,7 +355,7 @@ export function ContinuousProvider({ filter, children }: Props) {
       start = next;
     }
     return out;
-  }, [now, tz]);
+  }, [now]);
 
   // ---- navigation registry (§2A.3 / D11) -----------------------------------------
   const surfaces = useRef(new Map<SurfaceName, SurfaceApi>());
@@ -352,8 +391,9 @@ export function ContinuousProvider({ filter, children }: Props) {
   // console escape hatch for bring-up: frigateContinuous(false)
   const [, setEnabled] = useContinuousEnabled();
   useEffect(() => {
-    (window as unknown as { frigateContinuous: (v: boolean) => void }).frigateContinuous =
-      (v: boolean) => setEnabled(v);
+    (
+      window as unknown as { frigateContinuous: (v: boolean) => void }
+    ).frigateContinuous = (v: boolean) => setEnabled(v);
   }, [setEnabled]);
 
   const value = useMemo<ContinuousContextValue>(
@@ -379,13 +419,33 @@ export function ContinuousProvider({ filter, children }: Props) {
       extent,
       heavyQueue,
     }),
-    [enabled, tz, now, newest, oldest, hasMore, isLoadingOlder, loadOlder, ensureLoaded,
-     reviews, reviewsByCamera, patchReviews, chunks, registerSurface, navigateToTime,
-     selectedId, pendingNew, extent, heavyQueue],
+    [
+      enabled,
+      tz,
+      now,
+      newest,
+      oldest,
+      hasMore,
+      isLoadingOlder,
+      loadOlder,
+      ensureLoaded,
+      reviews,
+      reviewsByCamera,
+      patchReviews,
+      chunks,
+      registerSurface,
+      navigateToTime,
+      selectedId,
+      pendingNew,
+      extent,
+      heavyQueue,
+    ],
   );
 
   return (
-    <ContinuousContext.Provider value={value}>{children}</ContinuousContext.Provider>
+    <ContinuousContext.Provider value={value}>
+      {children}
+    </ContinuousContext.Provider>
   );
 }
 

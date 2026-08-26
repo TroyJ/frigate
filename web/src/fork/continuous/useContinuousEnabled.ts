@@ -10,7 +10,11 @@ import { useUserPersistence } from "@/hooks/use-user-persistence";
 
 export const CONTINUOUS_KEY = "continuousTimeline";
 
-export function useContinuousEnabled(): [boolean, (v: boolean) => void, boolean] {
+export function useContinuousEnabled(): [
+  boolean,
+  (v: boolean) => void,
+  boolean,
+] {
   const [value, setValue, loaded] = useUserPersistence<boolean>(
     CONTINUOUS_KEY,
     true,

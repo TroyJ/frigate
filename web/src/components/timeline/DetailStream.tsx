@@ -304,7 +304,8 @@ type ReviewGroupProps = {
   alwaysExpandActive?: boolean;
 };
 
-function ReviewGroup({
+// fork: exported so fork/continuous can reuse it (handover §4A.3)
+export function ReviewGroup({
   review,
   id,
   config,
