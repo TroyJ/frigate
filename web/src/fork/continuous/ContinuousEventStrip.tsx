@@ -129,10 +129,21 @@ export function ContinuousEventStrip({
     (segmentTime: number, ifNeeded?: boolean, behavior?: ScrollBehavior) => {
       const index = Math.round((startAligned - segmentTime) / segmentDuration);
       if (index < 0 || index >= count) return;
-      win.scrollToIndex(index, { ifNeeded, behavior });
+      // `ifNeeded` defaults ON here: every caller left is either the drag handler (which
+      // wants "keep the handle visible") or the minimap follow. An unconditional centring
+      // scroll fights the user.
+      win.scrollToIndex(index, { ifNeeded: ifNeeded ?? true, behavior });
     },
     [startAligned, segmentDuration, count, win],
   );
+
+  // The COPIED cell gets a no-op instead of the real `scrollToSegment`. Its only use of it
+  // is the minimap effect (cells/EventSegment.tsx: `scrollToSegment(alignedMinimapStartTime)`,
+  // unconditional, centred, smooth) whose deps include `events` — and the fork rebuilds
+  // that array from the bucket index on every window change, so the effect re-fires
+  // constantly and yanks the strip out from under the user. The container owns that scroll
+  // now, once, with `ifNeeded` (see the effect above). Do not pass the real one back in.
+  const cellScrollToSegment = useCallback(() => {}, []);
 
   // Keep the minimap band in view. Upstream does this INSIDE the cell — `EventSegment`
   // fires `scrollToSegment` when the first in-band segment mounts. Under K1 that cell is
@@ -149,6 +160,38 @@ export function ContinuousEventStrip({
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showMinimap, minimapStartTime, segmentDuration]);
+
+  /**
+   * Which review a segment click means. Upstream's cell resolves this with `getEvent`:
+   * the first event overlapping the segment WHOSE SEVERITY MATCHES the displayed tab —
+   * so clicking a detection band while on Alerts targets nothing, and a click anywhere in
+   * an event's band targets that event, not the next one along. Reproduced exactly here,
+   * because the container is where the scroll now happens (the card upstream queried for
+   * is usually unmounted under K2).
+   *
+   * `events` is the provider's UNFILTERED review list, matching upstream, which passes
+   * `reviewItems.all` — the strip paints every severity so you can see a detection band
+   * while on the alert tab. The grid, by contrast, shows the filtered list. That asymmetry
+   * is why the severity match below is not optional: without it a click on a band the grid
+   * cannot show would scroll the grid to an unrelated card.
+   */
+  const eventAt = useCallback(
+    (segmentTime: number): ReviewSegment | undefined =>
+      lookupEvents(segmentTime).find((e) => {
+        const start =
+          Math.floor(e.start_time / segmentDuration) * segmentDuration;
+        const end = e.end_time
+          ? Math.floor(e.end_time / segmentDuration) * segmentDuration +
+            segmentDuration
+          : Date.now() / 1000 + segmentDuration;
+        return (
+          segmentTime >= start &&
+          segmentTime < end &&
+          e.severity === severityType
+        );
+      }),
+    [lookupEvents, segmentDuration, severityType],
+  );
 
   // follow the grid (upstream EventReviewTimeline's behaviour, unchanged)
   useEffect(() => {
@@ -234,9 +277,20 @@ export function ContinuousEventStrip({
                 // mounted, so the query finds nothing and the click does nothing. Route the
                 // scroll through the navigation registry instead (§2A.3) — the cell's own
                 // handler still runs and still flashes the ring when the card IS mounted.
-                onClickCapture={() =>
-                  ctx.navigateToTime(segmentTime, { surface: "grid" })
-                }
+                //
+                // Guarded on there BEING an event, because upstream's handler is: a click
+                // on empty strip did nothing, and making it navigate turns every stray
+                // click into a jump. The event's own id and start_time are passed, so the
+                // grid selects that exact card and, if the filters hide it, falls back to
+                // the nearest card to the EVENT rather than to an arbitrary segment time.
+                onClickCapture={() => {
+                  const hit = eventAt(segmentTime);
+                  if (!hit) return;
+                  ctx.navigateToTime(hit.start_time, {
+                    surface: "grid",
+                    selectId: hit.id,
+                  });
+                }}
               >
                 <EventSegment
                   events={lookupEvents(segmentTime)}
@@ -249,7 +303,7 @@ export function ContinuousEventStrip({
                   severityType={severityType}
                   contentRef={contentRef}
                   setHandlebarTime={setHandlebarTime}
-                  scrollToSegment={scrollToSegment}
+                  scrollToSegment={cellScrollToSegment}
                   dense={dense}
                 />
               </div>
