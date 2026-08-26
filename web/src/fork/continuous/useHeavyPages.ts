@@ -173,8 +173,8 @@ export function useHeavyPages(params: {
         });
     }
     rerender();
-  // visible is consumed by value (after/before) so a new object with equal edges is a no-op
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // visible is consumed by value (after/before) so a new object with equal edges is a no-op
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     visible?.after,
     visible?.before,
