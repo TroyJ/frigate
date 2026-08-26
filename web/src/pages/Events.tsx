@@ -22,6 +22,7 @@ import {
 } from "@/utils/dateUtil";
 import EventView from "@/views/events/EventView";
 import { RecordingView } from "@/views/recording/RecordingView";
+import { ContinuousProvider } from "@/fork/continuous";
 import axios from "axios";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -492,19 +493,22 @@ export default function Events() {
   if (recording) {
     if (selectedReviewData) {
       return (
-        <RecordingView
-          key={selectedTimeRange.before}
-          startCamera={selectedReviewData.camera}
-          startTime={selectedReviewData.start_time}
-          allCameras={selectedReviewData.allCameras}
-          reviewItems={reviews}
-          reviewSummary={reviewSummary}
-          allPreviews={allPreviews}
-          timeRange={selectedTimeRange}
-          filter={reviewFilter}
-          updateFilter={onUpdateFilter}
-          refreshData={reloadData}
-        />
+        // fork: continuous-timeline provider wraps the scrubber (handover §8.4)
+        <ContinuousProvider filter={reviewSearchParams}>
+          <RecordingView
+            key={selectedTimeRange.before}
+            startCamera={selectedReviewData.camera}
+            startTime={selectedReviewData.start_time}
+            allCameras={selectedReviewData.allCameras}
+            reviewItems={reviews}
+            reviewSummary={reviewSummary}
+            allPreviews={allPreviews}
+            timeRange={selectedTimeRange}
+            filter={reviewFilter}
+            updateFilter={onUpdateFilter}
+            refreshData={reloadData}
+          />
+        </ContinuousProvider>
       );
     }
   } else {
