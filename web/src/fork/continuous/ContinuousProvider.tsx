@@ -39,6 +39,7 @@ import { useFrigateReviews } from "@/api/ws";
 import { useContinuousEnabled } from "./useContinuousEnabled";
 import { FetchQueue, isAbort } from "./fetchQueue";
 import { ReviewPage, mergeReviews, groupByCamera } from "./store";
+import { usePlaybackChunks } from "./usePlaybackChunks";
 import {
   DAY,
   EDGE_ALIGN,
@@ -60,6 +61,8 @@ export type SurfaceName =
 export type SurfaceApi = {
   /** Scroll so `t` is in view; select `selectId` if given. */
   scrollToTime: (t: number, selectId?: string) => void;
+  /** Jump to the newest edge. Used by the "N new" chip (§9.3, D17). */
+  scrollToTop?: () => void;
 };
 
 export type NavigateOptions = { surface?: SurfaceName; selectId?: string };
@@ -86,6 +89,14 @@ export type ContinuousContextValue = {
   /** Drop reviews from the merged list — deletes, which no page refetch will undo. */
   removeReviews: (ids: string[]) => void;
   chunks: TimeRange[];
+  /** Where the player is, as last reported. Undefined until a surface reports. */
+  playhead?: number;
+  /** Tell the provider where the player is, so the chunk window can follow it (§9.5). */
+  reportPlayhead: (t: number) => void;
+  /** Tell the provider whether the active surface is pinned to the newest edge (§9.3). */
+  reportAtTop: (atTop: boolean) => void;
+  /** Jump the active surface to the newest edge. */
+  scrollToTop: () => void;
   registerSurface: (name: SurfaceName, api: SurfaceApi) => () => void;
   navigateToTime: (t: number, opts?: NavigateOptions) => Promise<void>;
   selectedId?: string;
@@ -330,20 +341,55 @@ export function ContinuousProvider({ filter, children }: Props) {
   const pagesRef = useRef(pages);
   pagesRef.current = pages;
 
-  // ---- WebSocket merge (§9.4) ------------------------------------------------------
+  // §9.3: the chip only means anything while the user is NOT at the newest edge. The
+  // active surface reports its stickiness; sitting at the top clears the counter, which is
+  // what makes "N new" mean "arrived while you were reading history".
+  const [atTop, setAtTop] = useState(true);
+  const reportAtTop = useCallback((v: boolean) => {
+    setAtTop((prev) => (prev === v ? prev : v));
+  }, []);
+
+  // ---- WebSocket merge (§9.4, Phase 7) ---------------------------------------------
+  // `useFrigateReviews` carries all four types and the WS item ALWAYS wins over page data:
+  //   new    → a segment that no page has yet; it enters via `overrides` (mergeReviews
+  //            treats an unknown override id as an insert), which is what makes the live
+  //            tail work without refetching a page.
+  //   update → `end_time` and GenAI metadata arrive this way.
+  //   end    → the segment closed; its blip gains a length.
+  //   genai  → summary text landed.
+  // All four are the same operation — replace by id — so there is no per-type branch here,
+  // only the counter, which is "new" only.
   const wsReview = useFrigateReviews();
   const [pendingNew, setPendingNew] = useState(0);
+  const seenNew = useRef(new Set<string>());
   useEffect(() => {
     if (!wsReview || !wsReview.after) return;
     const item = wsReview.after;
     if (item.start_time < oldest) return;
+    // A deleted review can still receive an `end`/`genai` message in flight. Re-inserting
+    // it would resurrect a card the user just removed, so the tombstone wins.
+    if (removed.has(item.id)) return;
     setOverrides((prev) => {
+      const existing = prev.get(item.id);
+      if (existing && existing === item) return prev;
       const next = new Map(prev);
       next.set(item.id, item);
       return next;
     });
-    if (wsReview.type === "new") setPendingNew((n) => n + 1);
-  }, [wsReview, oldest]);
+    // count each id once: `new` can be redelivered, and an `update` for something we
+    // already counted must not bump it again
+    if (wsReview.type === "new" && !seenNew.current.has(item.id)) {
+      seenNew.current.add(item.id);
+      setPendingNew((n) => n + 1);
+    }
+  }, [wsReview, oldest, removed]);
+
+  // Sitting at the newest edge means there is nothing "new" to announce (§9.3).
+  useEffect(() => {
+    if (!atTop) return;
+    seenNew.current.clear();
+    setPendingNew((n) => (n === 0 ? n : 0));
+  }, [atTop, pendingNew]);
 
   const patchReviews = useCallback(
     (ids: string[], patch: Partial<ReviewSegment>) => {
@@ -380,23 +426,20 @@ export function ContinuousProvider({ filter, children }: Props) {
   );
   const reviewsByCamera = useMemo(() => groupByCamera(reviews), [reviews]);
 
-  // ---- playback chunks (F1) ------------------------------------------------------
-  const chunkOrigin = useRef<number>();
-  chunkOrigin.current ??= floorHourInTz(
-    now - RETENTION_FALLBACK_DAYS * DAY,
-    tz,
+  // ---- playback chunks (F1, §9.5) --------------------------------------------------
+  // A SLIDING window around the playhead, not the whole retained range — see
+  // usePlaybackChunks for why the identity has to stay stable between re-anchors.
+  const [playhead, setPlayhead] = useState<number>();
+  const reportPlayhead = useCallback((t: number) => {
+    if (!Number.isFinite(t)) return;
+    setPlayhead((prev) => (prev === t ? prev : t));
+  }, []);
+  const recordingFloor = useMemo(
+    () => extent.oldestRecording ?? now - RETENTION_FALLBACK_DAYS * DAY,
+    [extent.oldestRecording, now],
   );
-  const chunks = useMemo<TimeRange[]>(() => {
-    const out: TimeRange[] = [];
-    let start = chunkOrigin.current!;
-    const end = now;
-    while (start < end) {
-      const next = start + HOUR;
-      out.push({ after: start, before: Math.min(next, end) });
-      start = next;
-    }
-    return out;
-  }, [now]);
+  const playback = usePlaybackChunks({ playhead, now, floor: recordingFloor });
+  const chunks = playback.chunks;
 
   // ---- navigation registry (§2A.3 / D11) -----------------------------------------
   const surfaces = useRef(new Map<SurfaceName, SurfaceApi>());
@@ -416,6 +459,16 @@ export function ContinuousProvider({ filter, children }: Props) {
       surfaces.current.delete(name);
     };
   }, []);
+
+  // Every mounted surface, not just the "active" one: the Review page has a grid AND a
+  // strip on screen together, `activeSurface` is just whichever registered last, and "go to
+  // now" means both of them. Sending it to one leaves the other pointing at history.
+  const scrollToTop = useCallback(() => {
+    for (const api of surfaces.current.values()) {
+      if (api.scrollToTop) api.scrollToTop();
+      else api.scrollToTime(newest);
+    }
+  }, [newest]);
 
   const navigateToTime = useCallback(
     async (t: number, opts?: NavigateOptions) => {
@@ -451,6 +504,10 @@ export function ContinuousProvider({ filter, children }: Props) {
       patchReviews,
       removeReviews,
       chunks,
+      playhead,
+      reportPlayhead,
+      reportAtTop,
+      scrollToTop,
       registerSurface,
       navigateToTime,
       selectedId,
@@ -475,6 +532,10 @@ export function ContinuousProvider({ filter, children }: Props) {
       patchReviews,
       removeReviews,
       chunks,
+      playhead,
+      reportPlayhead,
+      reportAtTop,
+      scrollToTop,
       registerSurface,
       navigateToTime,
       selectedId,

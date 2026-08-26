@@ -53,6 +53,12 @@ export function useHeavyPages(params: {
   unavailScale: number;
   /** The time range currently on screen (newest `before`, oldest `after`). */
   visible: { after: number; before: number } | undefined;
+  /**
+   * The provider's tail tick (§9.4). There is no push channel for historical motion, so
+   * the page containing `now` is dropped and re-requested every time this changes; every
+   * older page is immutable and is never refetched. Omit to disable tail polling.
+   */
+  tailTick?: number;
   enabled?: boolean;
 }): HeavyData {
   const {
@@ -62,6 +68,7 @@ export function useHeavyPages(params: {
     motionScale,
     unavailScale,
     visible,
+    tailTick,
     enabled = true,
   } = params;
   const fam = familyKey(cameras, motionScale, unavailScale);
@@ -77,6 +84,22 @@ export function useHeavyPages(params: {
   }, [fam]);
 
   const wantedRef = useRef<Set<number>>(new Set());
+
+  // §9.4 tail poll. Declared BEFORE the fetch effect on purpose: React runs effects in
+  // declaration order, so on a tick this deletes the live page and the fetch effect below
+  // — which also lists `tailTick` in its deps — immediately re-requests it. Do not instead
+  // add `version` to the fetch effect's deps: it ends with an unconditional `rerender()`,
+  // so that would spin.
+  const lastTick = useRef(tailTick);
+  useEffect(() => {
+    if (tailTick === undefined || tailTick === lastTick.current) return;
+    lastTick.current = tailTick;
+    const [live] = pagesFor(tailTick, tailTick + 1, HEAVY_PAGE_HOURS, tz);
+    if (live && pages.get(live.after)?.status === "done") {
+      pages.delete(live.after);
+      rerender();
+    }
+  }, [tailTick, tz, pages, rerender]);
 
   useEffect(() => {
     if (!visible || !enabled) return;
@@ -178,6 +201,7 @@ export function useHeavyPages(params: {
   }, [
     visible?.after,
     visible?.before,
+    tailTick,
     enabled,
     tz,
     fam,

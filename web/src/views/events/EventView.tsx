@@ -41,6 +41,8 @@ import {
   ContinuousReviewGrid,
   ContinuousEventStrip,
   ContinuousMotionStrip,
+  ContinuousNewChip,
+  dayWindowFor,
   selectReviewItems,
   useContinuous,
 } from "@/fork/continuous";
@@ -881,7 +883,11 @@ function DetectionReview({
         className="no-scrollbar flex flex-1 flex-wrap content-start gap-2 overflow-y-auto md:gap-4"
       >
         {/* fork (D17): one "new items" mechanism. Upstream's pill is hidden when the
-            continuous panel is enabled; the fork's chip (§9.3) serves both pages. */}
+            continuous panel is enabled; the fork's chip (§9.3) serves both pages. It is
+            mounted in the same place so the positioning is upstream's. */}
+        {filter?.before == undefined && continuous.enabled && (
+          <ContinuousNewChip className="absolute left-1/2 z-[49] mr-[65px] mt-8 -translate-x-1/2 md:mr-[115px]" />
+        )}
         {filter?.before == undefined && !continuous.enabled && (
           <NewReviewData
             className="pointer-events-none absolute left-1/2 z-[49] -translate-x-1/2"
@@ -1153,11 +1159,31 @@ function MotionReview({
   const alignedAfter = alignStartDateToTimeline(timeRange.after);
   const alignedBefore = alignEndDateToTimeline(timeRange.before);
 
+  // fork: upstream fetches motion for the 24 h `timeRange`, but with the continuous strip
+  // the handlebar can be weeks back — and `getDetectionType` (the camera-tile severity
+  // ring) and `useCameraMotionNextTimestamp` (play-through) both read this. Past 24 h they
+  // simply went inert. Follow the playhead instead, in the SAME hour-aligned one-day window
+  // the strip's own pages use (F2), so the key only changes when the day changes.
+  const continuousTz = continuous.enabled ? continuous.tz : undefined;
+  const continuousPlayhead = continuous.enabled
+    ? continuous.playhead
+    : undefined;
+  const motionWindow = useMemo(() => {
+    if (!continuousTz) return { after: alignedAfter, before: alignedBefore };
+    return dayWindowFor(continuousPlayhead ?? timeRange.before, continuousTz);
+  }, [
+    continuousTz,
+    continuousPlayhead,
+    alignedAfter,
+    alignedBefore,
+    timeRange.before,
+  ]);
+
   const { data: motionData } = useSWR<MotionData[]>([
     "review/activity/motion",
     {
-      before: alignedBefore,
-      after: alignedAfter,
+      before: motionWindow.before,
+      after: motionWindow.after,
       scale: segmentDuration / 2,
       cameras: filter?.cameras?.join(",") ?? null,
     },

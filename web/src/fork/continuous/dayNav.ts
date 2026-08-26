@@ -28,6 +28,7 @@
  * comparison `>= t`, and keep the scan running oldest → newest.
  */
 import { ReviewSegment } from "@/types/review";
+import { pagesFor } from "./timeAlign";
 
 /**
  * Index of the OLDEST item whose `start_time >= t`, for a list sorted newest-first (D23).
@@ -43,4 +44,19 @@ export function indexAtOrAfter(
     if (items[i].start_time >= t) return i;
   }
   return 0;
+}
+
+/**
+ * The hour-aligned one-day window containing `t`, in the display timezone — the same page
+ * shape `useHeavyPages` requests (F2/§5.3: motion is min-max normalised per one-hour chunk
+ * counted from index 0 of the response, so an unaligned window returns different bar
+ * heights for the same timestamp). Its identity only changes when `t` crosses a day
+ * boundary, which is what keeps it usable as an SWR key while a playhead moves.
+ */
+export function dayWindowFor(
+  t: number,
+  tz: string,
+): { after: number; before: number } {
+  const [page] = pagesFor(t, t + 1, 24, tz);
+  return page ?? { after: t, before: t + 86400 };
 }

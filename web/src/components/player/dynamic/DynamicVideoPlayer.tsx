@@ -37,6 +37,9 @@ type DynamicVideoPlayerProps = {
   onTimestampUpdate?: (timestamp: number) => void;
   onClipEnded?: () => void;
   onSeekToTime?: (timestamp: number, play?: boolean) => void;
+  // fork (D21): what to say when the requested range has no recordings. Optional —
+  // omitted, this component behaves exactly as upstream.
+  emptyMessage?: string;
   setFullResolution: React.Dispatch<React.SetStateAction<VideoResolutionType>>;
   toggleFullscreen: () => void;
   containerRef?: React.MutableRefObject<HTMLDivElement | null>;
@@ -55,6 +58,7 @@ export default function DynamicVideoPlayer({
   onTimestampUpdate,
   onClipEnded,
   onSeekToTime,
+  emptyMessage,
   setFullResolution,
   toggleFullscreen,
   containerRef,
@@ -121,7 +125,16 @@ export default function DynamicVideoPlayer({
 
   useEffect(() => {
     if (!isScrubbing) {
-      setLoadingTimeout(setTimeout(() => setIsLoading(true), 1000));
+      // fork (D21): guarded. This timer is armed on mount, before `recordings` has
+      // resolved, and it is the thing that latched `isLoading` true forever when the answer
+      // turned out to be "there are none" — permanently hiding the message below. The
+      // effect on `noRecording` clears the flag; this stops the already-armed timer putting
+      // it straight back.
+      setLoadingTimeout(
+        setTimeout(() => {
+          if (!noRecordingRef.current) setIsLoading(true);
+        }, 1000),
+      );
     }
 
     return () => {
@@ -185,6 +198,21 @@ export default function DynamicVideoPlayer({
     [`${camera}/recordings`, recordingParams],
     { revalidateOnFocus: false },
   );
+
+  // fork (upstream bug, D21): the mount effect above starts a 1 s timer that sets
+  // `isLoading` unconditionally, and the only things that clear it (`onPlaying`,
+  // `onTimeUpdate`) require a player — which never exists when there are no recordings. So
+  // past the recording tail `isLoading` latched true forever and the "no recordings"
+  // message below was permanently suppressed: the user got a blank player and no
+  // explanation at all. Once we know there is nothing to load, stop claiming to load.
+  // Upstream-PR candidate; unrelated to the continuous timeline.
+  const noRecordingRef = useRef(false);
+  noRecordingRef.current = noRecording;
+  useEffect(() => {
+    if (!noRecording) return;
+    setIsLoading(false);
+    setIsBuffering(false);
+  }, [noRecording]);
 
   useEffect(() => {
     if (!recordings?.length) {
@@ -332,8 +360,8 @@ export default function DynamicVideoPlayer({
         <ActivityIndicator className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2" />
       )}
       {!isScrubbing && !isLoading && noRecording && (
-        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-          {t("noRecordingsFoundForThisTime")}
+        <div className="absolute left-1/2 top-1/2 max-w-[80%] -translate-x-1/2 -translate-y-1/2 text-center">
+          {emptyMessage ?? t("noRecordingsFoundForThisTime")}
         </div>
       )}
     </>

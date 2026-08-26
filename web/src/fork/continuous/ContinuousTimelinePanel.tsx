@@ -28,6 +28,7 @@ import {
 import { ContinuousMotionStrip } from "./ContinuousMotionStrip";
 import { ContinuousEventList } from "./ContinuousEventList";
 import { ContinuousDetailStream } from "./ContinuousDetailStream";
+import { ContinuousNewChip } from "./ContinuousNewChip";
 import { useContinuousStrict } from "./ContinuousProvider";
 
 export type ContinuousTimelinePanelProps = {
@@ -70,6 +71,11 @@ export function ContinuousTimelinePanel({
   onAnalysisOpen,
 }: ContinuousTimelinePanelProps) {
   const ctx = useContinuousStrict();
+  // §9.5: the playback chunk window follows the playhead, and RecordingView owns it.
+  const reportPlayhead = ctx.reportPlayhead;
+  useEffect(() => {
+    if (currentTime) reportPlayhead(currentTime);
+  }, [currentTime, reportPlayhead]);
   const internalTimelineRef = useRef<HTMLDivElement>(null);
   const selectedTimelineRef = timelineRef || internalTimelineRef;
 
@@ -148,6 +154,11 @@ export function ContinuousTimelinePanel({
           <div className="pointer-events-none absolute inset-x-0 top-0 z-20 h-[30px] w-full bg-gradient-to-b from-secondary to-transparent"></div>
           <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 h-[30px] w-full bg-gradient-to-t from-secondary to-transparent"></div>
         </>
+      )}
+      {/* D17: the "N new" chip serves both pages. On the narrow 100 px timeline column
+          there is no room for it, and the strip's own stick-to-top covers that case. */}
+      {timelineType != "timeline" && (
+        <ContinuousNewChip className="absolute inset-x-0 top-2 z-30" />
       )}
       {timelineType == "timeline" ? (
         <ContinuousMotionStrip

@@ -48,6 +48,7 @@ export function ContinuousEventList({
   useEffect(
     () =>
       ctx.registerSurface("events", {
+        scrollToTop: () => win.scrollToIndex(0, { align: "start" }),
         scrollToTime: (t, selectId) => {
           if (selectId && win.scrollToId(selectId)) return;
           // one primitive for both callers (see dayNav.ts): a segment click passes the
@@ -81,6 +82,7 @@ export function ContinuousEventList({
                 key={v.key}
                 ref={win.virtualizer.measureElement}
                 data-index={v.index}
+                data-continuous-id={review.id}
                 className={cn(
                   "absolute left-0 w-full px-4",
                   isMobile && "sm:portrait:w-1/2",
