@@ -513,25 +513,30 @@ export default function Events() {
     }
   } else {
     return (
-      <EventView
-        reviewItems={reviewItems}
-        currentReviewItems={currentItems}
-        reviewSummary={reviewSummary}
-        recordingsSummary={recordingsSummary}
-        relevantPreviews={allPreviews}
-        timeRange={selectedTimeRange}
-        filter={reviewFilter}
-        severity={severity ?? "alert"}
-        startTime={startTime}
-        showReviewed={showReviewed ?? false}
-        setShowReviewed={setShowReviewed}
-        setSeverity={setSeverity}
-        markItemAsReviewed={markItemAsReviewed}
-        markAllItemsAsReviewed={markAllItemsAsReviewed}
-        onOpenRecording={setRecording}
-        pullLatestData={reloadData}
-        updateFilter={onUpdateFilter}
-      />
+      // fork (D4): the same provider wraps the Review page, so S1/S2/S3 read one window
+      // (handover §8.4). Mounted here rather than inside EventView so the loaded pages and
+      // scroll depth survive EventView's own remounts.
+      <ContinuousProvider filter={reviewSearchParams}>
+        <EventView
+          reviewItems={reviewItems}
+          currentReviewItems={currentItems}
+          reviewSummary={reviewSummary}
+          recordingsSummary={recordingsSummary}
+          relevantPreviews={allPreviews}
+          timeRange={selectedTimeRange}
+          filter={reviewFilter}
+          severity={severity ?? "alert"}
+          startTime={startTime}
+          showReviewed={showReviewed ?? false}
+          setShowReviewed={setShowReviewed}
+          setSeverity={setSeverity}
+          markItemAsReviewed={markItemAsReviewed}
+          markAllItemsAsReviewed={markAllItemsAsReviewed}
+          onOpenRecording={setRecording}
+          pullLatestData={reloadData}
+          updateFilter={onUpdateFilter}
+        />
+      </ContinuousProvider>
     );
   }
 }

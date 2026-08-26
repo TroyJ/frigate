@@ -65,6 +65,22 @@ describe("pagesFor — deterministic hour-aligned grid", () => {
       expect(floorHourInTz(p.after, KTM)).toBe(p.after);
     }
   });
+  it("uses the SAME grid however you got there (72 h — the ensureLoaded bug)", () => {
+    // the old day-anchored grid made pagesFor(t, t+1) disagree with pagesFor(oldest, …)
+    // for 2 out of every 3 days, so ensureLoaded() never found its page by `after`.
+    const oldest = dayKeyToStartInTz("2026-07-27", BALI);
+    const grid = pagesFor(oldest, oldest + 30 * 86400, 72, BALI);
+    for (const page of grid) {
+      const probe = page.after + 5000;
+      expect(pagesFor(probe, probe + 1, 72, BALI)[0]).toEqual(page);
+    }
+  });
+  it("keeps 72 h boundaries on whole local hours in a DST zone", () => {
+    const from = dayKeyToStartInTz("2026-09-20", SYD); // around the AU DST change
+    for (const p of pagesFor(from, from + 30 * 86400, 72, SYD)) {
+      expect(floorHourInTz(p.after, SYD)).toBe(p.after);
+    }
+  });
   it("covers [after, before)", () => {
     const from = 1756200000;
     const pages = pagesFor(from, from + 7 * 86400, 24, BALI);

@@ -13,7 +13,13 @@
  *  - Family C cells (ReviewGroup) change height after mount; `measureElement` on each row
  *    handles it — callers must attach `virtualizer.measureElement` as the row ref.
  */
-import { RefObject, useCallback, useLayoutEffect, useRef } from "react";
+import {
+  RefObject,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+} from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 export const LOAD_OLDER_ITEMS = 12;
@@ -65,8 +71,15 @@ export function useItemWindow<T extends { id: string }>(params: {
 
   const virtualItems = virtualizer.getVirtualItems();
   const last = virtualItems[virtualItems.length - 1];
-  if (onNearEnd && last && last.index >= items.length - LOAD_OLDER_ITEMS)
-    onNearEnd();
+  // Fire in an effect, NOT during render: `onNearEnd` is `ctx.loadOlder`, which sets state
+  // on the PROVIDER — a render-phase update of a different component, which React warns
+  // about and which can drop the update. `nearEnd` stays true while the user sits at the
+  // bottom, so the effect re-fires on every `items.length` change and the window keeps
+  // chaining; repeated calls are idempotent against the provider's page grid (F12).
+  const nearEnd = !!(last && last.index >= items.length - LOAD_OLDER_ITEMS);
+  useEffect(() => {
+    if (nearEnd) onNearEnd?.();
+  }, [nearEnd, items.length, onNearEnd]);
 
   const scrollToId = useCallback(
     (
