@@ -83,6 +83,8 @@ export type ContinuousContextValue = {
   reviews: ReviewSegment[];
   reviewsByCamera: Map<string, ReviewSegment[]>;
   patchReviews: (ids: string[], patch: Partial<ReviewSegment>) => void;
+  /** Drop reviews from the merged list — deletes, which no page refetch will undo. */
+  removeReviews: (ids: string[]) => void;
   chunks: TimeRange[];
   registerSurface: (name: SurfaceName, api: SurfaceApi) => () => void;
   navigateToTime: (t: number, opts?: NavigateOptions) => Promise<void>;
@@ -183,7 +185,11 @@ export function ContinuousProvider({ filter, children }: Props) {
   const [overrides, setOverrides] = useState<Map<string, ReviewSegment>>(
     new Map(),
   );
-  const [removed] = useState<Set<string>>(new Set());
+  // A deleted review is gone from the server, so nothing a page refetch returns will bring
+  // it back — but the pages already in memory still hold it, hence the tombstone set.
+  // It must be replaced, never mutated: `reviews` is a useMemo keyed on this identity, so
+  // an in-place `.add()` leaves ghost cards on screen until something else re-renders.
+  const [removed, setRemoved] = useState<Set<string>>(() => new Set());
   const pageHours = useRef(REVIEW_PAGE_HOURS_FAST);
 
   // filter change discards everything (§14.4)
@@ -354,6 +360,20 @@ export function ContinuousProvider({ filter, children }: Props) {
     [removed],
   );
 
+  const removeReviews = useCallback((ids: string[]) => {
+    setRemoved((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) next.add(id);
+      return next;
+    });
+    setOverrides((prev) => {
+      if (!ids.some((id) => prev.has(id))) return prev;
+      const next = new Map(prev);
+      for (const id of ids) next.delete(id);
+      return next;
+    });
+  }, []);
+
   const reviews = useMemo(
     () => mergeReviews(pages.values(), overrides, removed),
     [pages, overrides, removed],
@@ -429,6 +449,7 @@ export function ContinuousProvider({ filter, children }: Props) {
       reviews,
       reviewsByCamera,
       patchReviews,
+      removeReviews,
       chunks,
       registerSurface,
       navigateToTime,
@@ -452,6 +473,7 @@ export function ContinuousProvider({ filter, children }: Props) {
       reviews,
       reviewsByCamera,
       patchReviews,
+      removeReviews,
       chunks,
       registerSurface,
       navigateToTime,

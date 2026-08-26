@@ -26,12 +26,21 @@ type ReviewActionGroupProps = {
   setSelectedReviews: (reviews: ReviewSegment[]) => void;
   onExport: (id: string) => void;
   pullLatestData: () => void;
+  // fork (continuous timeline seam, §8.4): this toolbar posts `reviews/viewed` and
+  // `reviews/delete` itself and then calls `pullLatestData()`, which refreshes the 24 h SWR
+  // window — a store the continuous surfaces do not read. Without these hooks a toolbar
+  // mark or delete leaves stale/ghost cards in a continuous grid at depth. Both are
+  // OPTIONAL: absent, this component behaves exactly as upstream.
+  onReviewedChange?: (ids: string[], reviewed: boolean) => void;
+  onDeleted?: (ids: string[]) => void;
 };
 export default function ReviewActionGroup({
   selectedReviews,
   setSelectedReviews,
   onExport,
   pullLatestData,
+  onReviewedChange,
+  onDeleted,
 }: ReviewActionGroupProps) {
   const { t } = useTranslation(["components/dialog"]);
   const isAdmin = useIsAdmin();
@@ -49,9 +58,16 @@ export default function ReviewActionGroup({
       ids,
       reviewed: !allReviewed,
     });
+    onReviewedChange?.(ids, !allReviewed);
     setSelectedReviews([]);
     pullLatestData();
-  }, [selectedReviews, setSelectedReviews, pullLatestData, allReviewed]);
+  }, [
+    selectedReviews,
+    setSelectedReviews,
+    pullLatestData,
+    allReviewed,
+    onReviewedChange,
+  ]);
 
   const onDelete = useCallback(() => {
     const ids = selectedReviews.map((review) => review.id);
@@ -62,6 +78,7 @@ export default function ReviewActionGroup({
           toast.success(t("recording.confirmDelete.toast.success"), {
             position: "top-center",
           });
+          onDeleted?.(ids);
           setSelectedReviews([]);
           pullLatestData();
         }
@@ -80,7 +97,7 @@ export default function ReviewActionGroup({
           },
         );
       });
-  }, [selectedReviews, setSelectedReviews, pullLatestData, t]);
+  }, [selectedReviews, setSelectedReviews, pullLatestData, onDeleted, t]);
 
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [bypassDialog, setBypassDialog] = useState(false);
