@@ -127,6 +127,30 @@ export default function EventView({
     [continuousReviews, severity, filter?.showAll, showReviewed],
   );
 
+  // fork: upstream's mark-reviewed mutations write into the 24 h `reviews` SWR cache,
+  // which the continuous surfaces do not read. Mirror them into the provider's override
+  // map as well, or a card outside the head page never leaves a `showReviewed = false`
+  // grid: the WebSocket message does not carry `has_been_reviewed`, and the provider only
+  // force-refetches the page containing `now`.
+  const patchContinuous = continuous.enabled ? continuous.patchReviews : null;
+  const markReviewed = useCallback(
+    (review: ReviewSegment) => {
+      patchContinuous?.([review.id], { has_been_reviewed: true });
+      markItemAsReviewed(review);
+    },
+    [markItemAsReviewed, patchContinuous],
+  );
+  const markManyReviewed = useCallback(
+    (items: ReviewSegment[]) => {
+      patchContinuous?.(
+        items.map((i) => i.id),
+        { has_been_reviewed: true },
+      );
+      markAllItemsAsReviewed(items);
+    },
+    [markAllItemsAsReviewed, patchContinuous],
+  );
+
   // review counts
 
   const reviewCounts = useMemo(() => {
@@ -204,8 +228,14 @@ export default function EventView({
       } else {
         // If a specific date is selected in the calendar and it's after the event start,
         // use the selected date instead of the event start time
-        const effectiveStartTime =
-          timeRange.after > review.start_time
+        //
+        // fork: that clamp is upstream's 24 h `selectedTimeRange`, which the continuous
+        // grid has scrolled far past — applying it opened EVERY card older than 24 h at
+        // "24 hours ago" instead of at the review. The clamp only means anything while the
+        // calendar is a day FILTER, which the continuous window replaces (D1), so skip it.
+        const effectiveStartTime = continuous.enabled
+          ? review.start_time
+          : timeRange.after > review.start_time
             ? timeRange.after
             : review.start_time;
 
@@ -217,15 +247,16 @@ export default function EventView({
         });
 
         review.has_been_reviewed = true;
-        markItemAsReviewed(review);
+        markReviewed(review);
       }
     },
     [
       selectedReviews,
       setSelectedReviews,
       onOpenRecording,
-      markItemAsReviewed,
+      markReviewed,
       timeRange.after,
+      continuous.enabled,
     ],
   );
   const onSelectAllReviews = useCallback(() => {
@@ -245,9 +276,22 @@ export default function EventView({
 
   const exportReview = useCallback(
     (id: string) => {
-      const review = reviewItems?.all?.find((seg) => seg.id == id);
+      // fork: `reviewItems` is upstream's 24 h bundle, so exporting anything the
+      // continuous grid scrolled to used to resolve to nothing and return silently.
+      // Resolve against the loaded window, and say so when the id really is gone (D9:
+      // a stored reference to a deleted review is an expected state, not a crash).
+      const review =
+        (continuousReviews ?? reviewItems?.all)?.find((seg) => seg.id == id) ??
+        reviewItems?.all?.find((seg) => seg.id == id);
 
       if (!review) {
+        toast.error(
+          t("export.toast.error.failed", {
+            ns: "components/dialog",
+            message: t("reviewNotFound", { defaultValue: "review not found" }),
+          }),
+          { position: "top-center" },
+        );
         return;
       }
 
@@ -293,7 +337,7 @@ export default function EventView({
           );
         });
     },
-    [reviewItems, t],
+    [continuousReviews, reviewItems, t],
   );
 
   const [motionOnly, setMotionOnly] = useState(false);
@@ -463,8 +507,8 @@ export default function EventView({
             startTime={startTime}
             loading={severity != severityToggle}
             emptyCardData={emptyCardData}
-            markItemAsReviewed={markItemAsReviewed}
-            markAllItemsAsReviewed={markAllItemsAsReviewed}
+            markItemAsReviewed={markReviewed}
+            markAllItemsAsReviewed={markManyReviewed}
             onSelectReview={onSelectReview}
             onSelectAllReviews={onSelectAllReviews}
             setSelectedReviews={setSelectedReviews}
@@ -766,12 +810,30 @@ function DetectionReview({
           break;
         case "r":
           if (selectedReviews.length > 0 && !modifiers.repeat) {
-            currentItems?.forEach((item) => {
-              if (selectedReviews.some((r) => r.id === item.id)) {
-                item.has_been_reviewed = true;
-                markItemAsReviewed(item);
+            if (continuous.enabled) {
+              // fork (D18): intersecting the selection with `currentItems` silently marked
+              // only the last 24 h and then cleared the selection — with select-all-loaded
+              // that is most of the selection quietly dropped. Act on the selection itself.
+              // It is ALSO posted as ONE bulk call: at the review floor the selection can
+              // be thousands of items, and a POST per item is thousands of requests
+              // against the single API worker — the F12 starvation that gets the add-on
+              // restarted. `markAllItemsAsReviewed` already batches the ids; its optimistic
+              // severity-wide flip lands in the 24 h SWR cache, which nothing renders while
+              // the continuous grid is on, and the provider is patched with the exact ids.
+              const done = selectedReviews.filter((item) => item.end_time);
+              done.forEach((item) => (item.has_been_reviewed = true));
+              if (done.length > 0) {
+                markAllItemsAsReviewed(done);
               }
-            });
+            } else {
+              const selectedIds = new Set(selectedReviews.map((r) => r.id));
+              currentItems?.forEach((item) => {
+                if (selectedIds.has(item.id)) {
+                  item.has_been_reviewed = true;
+                  markItemAsReviewed(item);
+                }
+              });
+            }
             setSelectedReviews([]);
             return true;
           }
@@ -821,7 +883,15 @@ function DetectionReview({
         )}
 
         {/* fork (continuous timeline seam, §8.4 / D4): S1. The upstream grid stays
-            in the tree and is one toggle away. */}
+            in the tree and is one toggle away.
+
+            Deliberately NOT carried over: upstream's "Mark these items as reviewed" bulk
+            button at the end of the grid. "These items" meant one 24 h page; under the
+            continuous grid it would mean every loaded item — thousands of ids in one
+            unconfirmed click, and `markAllItemsAsReviewed` additionally flips every
+            same-severity segment in the cache. Ctrl+A then `r` does the same thing
+            deliberately (D18) and is the supported path. If it comes back it needs a
+            count in the label and a confirm step. */}
         {continuous.enabled ? (
           <ContinuousReviewGrid
             contentRef={contentRef}
@@ -916,14 +986,11 @@ function DetectionReview({
         )}
       </div>
       <div className="flex w-[65px] flex-row md:w-[110px]">
-        <div
-          className={cn(
-            "no-scrollbar w-[55px] md:w-[100px]",
-            // the fork strip owns its own scroller (K1 reads that element's
-            // scrollTop); upstream's needs the wrapper to scroll. Do not merge these.
-            continuous.enabled ? "relative" : "overflow-y-auto",
-          )}
-        >
+        {/* fork: NOT a scroller. Upstream's class here is `relative` and both strips
+            (upstream's EventReviewTimeline and the fork's ContinuousEventStrip) own their
+            own `overflow-y-auto` scroller inside ReviewTimeline. Adding one here nests two
+            scrollers and splits the wheel events between them. */}
+        <div className="no-scrollbar relative w-[55px] md:w-[100px]">
           {loading ? (
             <Skeleton className="size-full" />
           ) : /* fork (§8.4 / D4): S2 */ continuous.enabled ? (
@@ -1315,11 +1382,17 @@ function MotionReview({
           })}
         </div>
       </div>
-      <div className="no-scrollbar relative w-[55px] md:w-[100px]">
-        {/* fork (§8.4 / D4): S3 — the same K1 strip as S4, in `motionOnly` mode. The
-            wrapper drops `overflow-y-auto` because the fork strip owns its own scroller
-            (K1 reads that element's scrollTop); a second scroller above it would split
-            the wheel events between them. */}
+      <div
+        className={cn(
+          "no-scrollbar w-[55px] md:w-[100px]",
+          // Only the FORK strip owns its own scroller (K1 reads that element's scrollTop),
+          // so nesting a second one here would split the wheel events. Upstream's
+          // MotionReviewTimeline genuinely relies on this wrapper scrolling — leave its
+          // branch exactly as upstream had it.
+          continuous.enabled ? "relative" : "overflow-y-auto",
+        )}
+      >
+        {/* fork (§8.4 / D4): S3 — the same K1 strip as S4, in `motionOnly` mode. */}
         {continuous.enabled ? (
           <ContinuousMotionStrip
             surface="motion"

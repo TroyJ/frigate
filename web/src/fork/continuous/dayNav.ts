@@ -10,10 +10,17 @@
  * `indexAtOrAfter` is deliberately ONE primitive for two callers, because building them
  * separately is exactly how they diverge (§2A / D11):
  *
- *  - a strip segment click passes the segment's own time → "the first item at or after
- *    this moment", which is what upstream's DOM-query behaviour did;
  *  - a calendar day-jump passes `startOfDayInTz(t)` → "the first item at or after 00:00",
- *    which *is* D14's "the day's earliest review" for a sparse list.
+ *    which *is* D14's "the day's earliest review" for a sparse list;
+ *  - a deep link or a strip-segment click passes the time of a SPECIFIC review, alongside
+ *    that review's id — the id is what actually selects the card, and this scan is only
+ *    the fallback for when the current filters hide it.
+ *
+ * Note what this is NOT: it is not how a strip click picks its target. Upstream resolves a
+ * segment click through `getEvent` — the event OVERLAPPING that segment whose severity
+ * matches the displayed tab — and `ContinuousEventStrip` reproduces that before calling
+ * `navigateToTime`. Using "the next item at or after the segment time" as the primary
+ * resolution would target the wrong review for every row of a band except its first.
  *
  * The earlier version of this scan searched for `start_time < nextDayStart` from the
  * oldest end. That matches the OLDEST loaded item on the first comparison, so every
