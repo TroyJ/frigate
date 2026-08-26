@@ -36,6 +36,15 @@ import { LuFolderCheck, LuFolderX } from "react-icons/lu";
 import { MdCircle } from "react-icons/md";
 import useSWR from "swr";
 import MotionReviewTimeline from "@/components/timeline/MotionReviewTimeline";
+// fork (continuous timeline seam, handover §8.4 / D4): the three Review-page surfaces
+import {
+  ContinuousReviewGrid,
+  ContinuousEventStrip,
+  ContinuousMotionStrip,
+  selectReviewItems,
+  useContinuous,
+} from "@/fork/continuous";
+import type { VisibleReviewRange } from "@/fork/continuous";
 import { Button } from "@/components/ui/button";
 import PreviewPlayer, {
   PreviewController,
@@ -100,6 +109,23 @@ export default function EventView({
   const { t } = useTranslation(["views/events"]);
   const { data: config } = useSWR<FrigateConfig>("config");
   const contentRef = useRef<HTMLDivElement | null>(null);
+
+  // fork: the provider's list, bucketed the same way `pages/Events.tsx` buckets its 24 h
+  // one. D18 — this array is also what "select all" means on the virtualized grid.
+  const continuous = useContinuous();
+  const continuousReviews = continuous.enabled ? continuous.reviews : undefined;
+  const continuousItems = useMemo(
+    () =>
+      continuousReviews
+        ? selectReviewItems(
+            continuousReviews,
+            filter?.showAll ? undefined : severity,
+            filter?.showAll,
+            showReviewed,
+          )
+        : null,
+    [continuousReviews, severity, filter?.showAll, showReviewed],
+  );
 
   // review counts
 
@@ -203,16 +229,19 @@ export default function EventView({
     ],
   );
   const onSelectAllReviews = useCallback(() => {
-    if (!currentReviewItems || currentReviewItems.length == 0) {
+    // fork (D18): on a virtualized grid "all" is every LOADED item — the array, not the
+    // DOM rows and not the 24 h page. The bulk endpoints take ids, so this is safe.
+    const selectable = continuousItems ?? currentReviewItems;
+    if (!selectable || selectable.length == 0) {
       return;
     }
 
-    if (selectedReviews.length < currentReviewItems.length) {
-      setSelectedReviews(currentReviewItems);
+    if (selectedReviews.length < selectable.length) {
+      setSelectedReviews(selectable);
     } else {
       setSelectedReviews([]);
     }
-  }, [currentReviewItems, selectedReviews]);
+  }, [continuousItems, currentReviewItems, selectedReviews]);
 
   const exportReview = useCallback(
     (id: string) => {
@@ -424,6 +453,7 @@ export default function EventView({
             contentRef={contentRef}
             reviewItems={reviewItems}
             currentItems={currentReviewItems}
+            continuousItems={continuousItems}
             relevantPreviews={relevantPreviews}
             selectedReviews={selectedReviews}
             itemsToReview={reviewCounts[severityToggle]}
@@ -446,6 +476,7 @@ export default function EventView({
             key={timeRange.before}
             contentRef={contentRef}
             reviewItems={reviewItems}
+            continuousItems={continuousItems}
             relevantPreviews={relevantPreviews}
             timeRange={timeRange}
             startTime={startTime}
@@ -469,6 +500,8 @@ type DetectionReviewProps = {
     significant_motion: ReviewSegment[];
   };
   currentItems: ReviewSegment[] | null;
+  /** fork: the provider's already-bucketed list; null when the toggle is off. */
+  continuousItems: ReviewSegment[] | null;
   itemsToReview?: number;
   relevantPreviews?: Preview[];
   selectedReviews: ReviewSegment[];
@@ -493,6 +526,7 @@ function DetectionReview({
   contentRef,
   reviewItems,
   currentItems,
+  continuousItems,
   itemsToReview,
   relevantPreviews,
   selectedReviews,
@@ -510,6 +544,7 @@ function DetectionReview({
   pullLatestData,
 }: DetectionReviewProps) {
   const { t } = useTranslation(["views/events"]);
+  const continuous = useContinuous();
 
   const reviewTimelineRef = useRef<HTMLDivElement>(null);
 
@@ -629,6 +664,15 @@ function DetectionReview({
     return data;
   }, [minimap]);
 
+  // fork (S1): under the continuous grid the visible band is derived from the
+  // virtualizer, not from the IntersectionObserver above — rows unmount as you scroll,
+  // so the observed set churns and the observer's bounds jitter. Same contract.
+  const [continuousVisible, setContinuousVisible] =
+    useState<VisibleReviewRange>();
+  const effectiveMinimapBounds = continuous.enabled
+    ? (continuousVisible?.bounds ?? { start: 0, end: 0 })
+    : minimapBounds;
+
   const minimapRef = useCallback(
     (node: HTMLElement | null) => {
       if (!minimapObserver.current) {
@@ -655,7 +699,8 @@ function DetectionReview({
     }
 
     const visibleTime = getVisibleTimelineDuration();
-    const minimapTime = minimapBounds.end - minimapBounds.start;
+    const minimapTime =
+      effectiveMinimapBounds.end - effectiveMinimapBounds.start;
     if (visibleTime && minimapTime >= visibleTime * 0.75) {
       return false;
     }
@@ -663,12 +708,15 @@ function DetectionReview({
     return true;
     // we know that these deps are correct
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contentRef.current?.scrollHeight, minimapBounds]);
+  }, [contentRef.current?.scrollHeight, effectiveMinimapBounds]);
 
   const visibleTimestamps = useMemo(
     () => minimap.map((str) => parseFloat(str)),
     [minimap],
   );
+  const effectiveVisibleTimestamps = continuous.enabled
+    ? (continuousVisible?.timestamps ?? [])
+    : visibleTimestamps;
 
   // existing review item
 
@@ -744,7 +792,9 @@ function DetectionReview({
         ref={contentRef}
         className="no-scrollbar flex flex-1 flex-wrap content-start gap-2 overflow-y-auto md:gap-4"
       >
-        {filter?.before == undefined && (
+        {/* fork (D17): one "new items" mechanism. Upstream's pill is hidden when the
+            continuous panel is enabled; the fork's chip (§9.3) serves both pages. */}
+        {filter?.before == undefined && !continuous.enabled && (
           <NewReviewData
             className="pointer-events-none absolute left-1/2 z-[49] -translate-x-1/2"
             contentRef={contentRef}
@@ -770,82 +820,132 @@ function DetectionReview({
           />
         )}
 
-        {/* fork (F8): contentRef must point at the scroll container above, not this
-            inner grid — every consumer (minimap observer root, scroll lock, the
-            scrollHeight check, NewReviewData's scrollTo) expects the scroller. */}
-        <div className="grid w-full gap-2 px-1 sm:grid-cols-2 md:mx-2 md:grid-cols-3 md:gap-4 3xl:grid-cols-4">
-          {!loading && currentItems
-            ? currentItems.map((value) => {
-                const selected = selectedReviews.some((r) => r.id === value.id);
+        {/* fork (continuous timeline seam, §8.4 / D4): S1. The upstream grid stays
+            in the tree and is one toggle away. */}
+        {continuous.enabled ? (
+          <ContinuousReviewGrid
+            contentRef={contentRef}
+            items={continuousItems ?? []}
+            segmentDuration={zoomSettings.segmentDuration}
+            selectedReviews={selectedReviews}
+            relevantPreviews={relevantPreviews}
+            timeRange={timeRange}
+            scrollLock={scrollLock}
+            markItemAsReviewed={markItemAsReviewed}
+            onPreviewTimeUpdate={onPreviewTimeUpdate}
+            onSelectReview={onSelectReview}
+            onVisibleChange={setContinuousVisible}
+          />
+        ) : (
+          <>
+            {/* fork (F8): contentRef must point at the scroll container above, not this
+              inner grid — every consumer (minimap observer root, scroll lock, the
+              scrollHeight check, NewReviewData's scrollTo) expects the scroller. */}
+            <div className="grid w-full gap-2 px-1 sm:grid-cols-2 md:mx-2 md:grid-cols-3 md:gap-4 3xl:grid-cols-4">
+              {!loading && currentItems
+                ? currentItems.map((value) => {
+                    const selected = selectedReviews.some(
+                      (r) => r.id === value.id,
+                    );
 
-                return (
-                  <div
-                    key={value.id}
-                    ref={minimapRef}
-                    data-start={value.start_time}
-                    data-segment-start={
-                      alignStartDateToTimeline(value.start_time) -
-                      zoomSettings.segmentDuration
-                    }
-                    className="review-item relative rounded-lg"
-                  >
-                    <div className="aspect-video overflow-hidden rounded-lg">
-                      <PreviewThumbnailPlayer
-                        review={value}
-                        allPreviews={relevantPreviews}
-                        timeRange={timeRange}
-                        setReviewed={markItemAsReviewed}
-                        scrollLock={scrollLock}
-                        onTimeUpdate={onPreviewTimeUpdate}
-                        onClick={(
-                          review: ReviewSegment,
-                          ctrl: boolean,
-                          detail: boolean,
-                        ) => {
-                          onSelectReview(review, ctrl, detail);
-                        }}
-                      />
-                    </div>
-                    <div
-                      className={cn(
-                        "review-item-ring pointer-events-none absolute inset-0 z-10 size-full rounded-lg outline outline-[3px] -outline-offset-[2.8px]",
-                        selected
-                          ? `outline-severity_${value.severity} shadow-severity_${value.severity}`
-                          : "outline-transparent duration-500",
-                      )}
-                    />
+                    return (
+                      <div
+                        key={value.id}
+                        ref={minimapRef}
+                        data-start={value.start_time}
+                        data-segment-start={
+                          alignStartDateToTimeline(value.start_time) -
+                          zoomSettings.segmentDuration
+                        }
+                        className="review-item relative rounded-lg"
+                      >
+                        <div className="aspect-video overflow-hidden rounded-lg">
+                          <PreviewThumbnailPlayer
+                            review={value}
+                            allPreviews={relevantPreviews}
+                            timeRange={timeRange}
+                            setReviewed={markItemAsReviewed}
+                            scrollLock={scrollLock}
+                            onTimeUpdate={onPreviewTimeUpdate}
+                            onClick={(
+                              review: ReviewSegment,
+                              ctrl: boolean,
+                              detail: boolean,
+                            ) => {
+                              onSelectReview(review, ctrl, detail);
+                            }}
+                          />
+                        </div>
+                        <div
+                          className={cn(
+                            "review-item-ring pointer-events-none absolute inset-0 z-10 size-full rounded-lg outline outline-[3px] -outline-offset-[2.8px]",
+                            selected
+                              ? `outline-severity_${value.severity} shadow-severity_${value.severity}`
+                              : "outline-transparent duration-500",
+                          )}
+                        />
+                      </div>
+                    );
+                  })
+                : (itemsToReview ?? 0) > 0 &&
+                  Array(itemsToReview)
+                    .fill(0)
+                    .map((_, idx) => (
+                      <Skeleton key={idx} className="aspect-video size-full" />
+                    ))}
+              {!loading &&
+                (currentItems?.filter((seg) => seg.end_time)?.length ?? 0) >
+                  0 &&
+                (itemsToReview ?? 0) > 0 && (
+                  <div className="col-span-full flex items-center justify-center">
+                    <Button
+                      className="text-balance text-white"
+                      aria-label={t("markTheseItemsAsReviewed")}
+                      variant="select"
+                      onClick={() => {
+                        setSelectedReviews([]);
+                        markAllItemsAsReviewed(currentItems ?? []);
+                      }}
+                    >
+                      {t("markTheseItemsAsReviewed")}
+                    </Button>
                   </div>
-                );
-              })
-            : (itemsToReview ?? 0) > 0 &&
-              Array(itemsToReview)
-                .fill(0)
-                .map((_, idx) => (
-                  <Skeleton key={idx} className="aspect-video size-full" />
-                ))}
-          {!loading &&
-            (currentItems?.filter((seg) => seg.end_time)?.length ?? 0) > 0 &&
-            (itemsToReview ?? 0) > 0 && (
-              <div className="col-span-full flex items-center justify-center">
-                <Button
-                  className="text-balance text-white"
-                  aria-label={t("markTheseItemsAsReviewed")}
-                  variant="select"
-                  onClick={() => {
-                    setSelectedReviews([]);
-                    markAllItemsAsReviewed(currentItems ?? []);
-                  }}
-                >
-                  {t("markTheseItemsAsReviewed")}
-                </Button>
-              </div>
-            )}
-        </div>
+                )}
+            </div>
+          </>
+        )}
       </div>
       <div className="flex w-[65px] flex-row md:w-[110px]">
-        <div className="no-scrollbar relative w-[55px] md:w-[100px]">
+        <div
+          className={cn(
+            "no-scrollbar w-[55px] md:w-[100px]",
+            // the fork strip owns its own scroller (K1 reads that element's
+            // scrollTop); upstream's needs the wrapper to scroll. Do not merge these.
+            continuous.enabled ? "relative" : "overflow-y-auto",
+          )}
+        >
           {loading ? (
             <Skeleton className="size-full" />
+          ) : /* fork (§8.4 / D4): S2 */ continuous.enabled ? (
+            <ContinuousEventStrip
+              segmentDuration={zoomSettings.segmentDuration}
+              timestampSpread={zoomSettings.timestampSpread}
+              showMinimap={showMinimap && !previewTime}
+              minimapStartTime={effectiveMinimapBounds.start}
+              minimapEndTime={effectiveMinimapBounds.end}
+              showHandlebar={previewTime != undefined}
+              handlebarTime={previewTime}
+              visibleTimestamps={effectiveVisibleTimestamps}
+              events={continuous.reviews}
+              severityType={severity}
+              contentRef={contentRef}
+              timelineRef={reviewTimelineRef}
+              dense={isMobile}
+              isZooming={isZooming}
+              zoomDirection={zoomDirection}
+              possibleZoomLevels={possibleZoomLevels}
+              currentZoomLevel={currentZoomLevel}
+            />
           ) : (
             <EventReviewTimeline
               segmentDuration={zoomSettings.segmentDuration}
@@ -871,7 +971,12 @@ function DetectionReview({
           )}
         </div>
         <div className="w-[10px]">
-          {loading ? (
+          {/* fork: SummaryTimeline is deliberately NOT rendered under the continuous
+              strip. It renders one <SummarySegment> per review over `timelineStart..End`
+              and drives its viewport indicator from that span — at the review floor that
+              is thousands of DOM nodes AND the wrong span, so it would be both slow and
+              lying. A continuous overview bar is its own piece of work (Phase 9). */}
+          {continuous.enabled ? null : loading ? (
             <Skeleton className="w-full" />
           ) : (
             <SummaryTimeline
@@ -897,6 +1002,8 @@ type MotionReviewProps = {
     detection: ReviewSegment[];
     significant_motion: ReviewSegment[];
   };
+  /** fork: the provider's already-bucketed list; null when the toggle is off. */
+  continuousItems: ReviewSegment[] | null;
   relevantPreviews?: Preview[];
   timeRange: TimeRange;
   startTime?: number;
@@ -908,6 +1015,7 @@ type MotionReviewProps = {
 function MotionReview({
   contentRef,
   reviewItems,
+  continuousItems,
   relevantPreviews,
   timeRange,
   startTime,
@@ -918,6 +1026,7 @@ function MotionReview({
 }: MotionReviewProps) {
   const segmentDuration = 30;
   const { data: config } = useSWR<FrigateConfig>("config");
+  const continuous = useContinuous();
 
   const reviewCameras = useMemo(() => {
     if (!config) {
@@ -963,9 +1072,23 @@ function MotionReview({
 
   // timeline time
 
+  // fork (F1): with the continuous strip the preview players must be able to follow the
+  // handlebar anywhere in the retained range, so the chunk list comes from the provider —
+  // one-hour chunks over the whole range, never a multi-day span handed to nginx-vod.
+  // Without this, scrubbing past the 24 h window makes `findIndex` return -1 and the
+  // seek is silently dropped (§14.3).
+  const continuousChunks = continuous.enabled ? continuous.chunks : undefined;
+  const continuousWindow = continuous.enabled ? continuous.window : undefined;
   const timeRangeSegments = useMemo(
-    () => getChunkedTimeRange(timeRange.after, timeRange.before),
-    [timeRange],
+    () =>
+      continuousChunks && continuousWindow
+        ? {
+            start: continuousWindow.oldest,
+            end: continuousWindow.newest,
+            ranges: continuousChunks,
+          }
+        : getChunkedTimeRange(timeRange.after, timeRange.before),
+    [timeRange, continuousChunks, continuousWindow],
   );
 
   const initialIndex = useMemo(() => {
@@ -1106,7 +1229,9 @@ function MotionReview({
     ],
   );
 
-  if (motionData?.length === 0) {
+  // fork: with the continuous strip, "no motion in the last 24 h" is not an empty page —
+  // there are weeks of strip below it. Only upstream's 24 h view may bail out here.
+  if (!continuous.enabled && motionData?.length === 0) {
     return (
       <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
         <EmptyCard
@@ -1190,8 +1315,35 @@ function MotionReview({
           })}
         </div>
       </div>
-      <div className="no-scrollbar w-[55px] overflow-y-auto md:w-[100px]">
-        {motionData ? (
+      <div className="no-scrollbar relative w-[55px] md:w-[100px]">
+        {/* fork (§8.4 / D4): S3 — the same K1 strip as S4, in `motionOnly` mode. The
+            wrapper drops `overflow-y-auto` because the fork strip owns its own scroller
+            (K1 reads that element's scrollTop); a second scroller above it would split
+            the wheel events between them. */}
+        {continuous.enabled ? (
+          <ContinuousMotionStrip
+            surface="motion"
+            cameras={reviewCameras.map((c) => c.name).join(",")}
+            events={continuousItems ?? []}
+            segmentDuration={segmentDuration}
+            timestampSpread={15}
+            motionOnly={motionOnly}
+            showHandlebar
+            handlebarTime={currentTime}
+            setHandlebarTime={setCurrentTime}
+            contentRef={contentRef}
+            onHandlebarDraggingChange={(dragging) => {
+              if (playing && dragging) {
+                setPlaying(false);
+              }
+              setScrubbing(dragging);
+            }}
+            dense={isMobileOnly}
+            isZooming={false}
+            zoomDirection={null}
+            alwaysShowMotionLine={true}
+          />
+        ) : motionData ? (
           <MotionReviewTimeline
             segmentDuration={segmentDuration}
             timestampSpread={15}

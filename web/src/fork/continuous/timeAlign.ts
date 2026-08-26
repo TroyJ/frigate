@@ -14,7 +14,7 @@
  *  - §3.4: segment pitch is a multiple of every zoom level (5/10/15/30/60 s), so window
  *    edges are aligned to 60 s and stay valid across zoom changes.
  */
-import { fromZonedTime, toZonedTime } from "date-fns-tz";
+import { fromZonedTime, getTimezoneOffset, toZonedTime } from "date-fns-tz";
 
 export const HOUR = 3600;
 export const DAY = 86400;
@@ -82,11 +82,36 @@ export function dayKeyToStartInTz(key: string, tz: string): number {
 export type Page = { after: number; before: number };
 
 /**
- * Split [after, before) into hour-aligned pages of at most `spanHours` hours, aligned to
- * whole hours in `tz`. Page boundaries are deterministic functions of the timestamp
- * (a fixed grid anchored at the epoch-hour in tz), so the same page is requested with the
- * same `after` no matter how the user scrolled there — that is what keeps the per-hour
- * normalisation identical across requests (§5.3).
+ * Floor `t` onto a FIXED grid of `span`-second cells anchored at the local epoch in `tz`.
+ *
+ * The grid must not depend on where the query started. The first version anchored each
+ * call on `startOfDayInTz(after)`, which makes the lattice a function of the day `after`
+ * happens to fall in: with a 72 h span, `pagesFor(oldest, …)` and `pagesFor(t, t+1)`
+ * produced different `after` values two times out of three. That is not cosmetic —
+ * `ContinuousProvider.ensureLoaded` looks the page up BY `after`, so a `navigateToTime`
+ * into an already-loaded region waited out its whole 10 s timeout and then scrolled, and
+ * the same window could be fetched twice under two keys. Keep this anchored at a fixed
+ * point, not at the caller's position.
+ *
+ * DST: the offset is resolved at `t` and then re-resolved at the snapped instant, so a
+ * snap that crosses a transition lands on the boundary computed with the offset that
+ * actually applies there.
+ */
+export function snapToSpanGrid(t: number, span: number, tz: string): number {
+  const off1 = getTimezoneOffset(tz, new Date(t * 1000)) / 1000;
+  const snapped = Math.floor((t + off1) / span) * span - off1;
+  const off2 = getTimezoneOffset(tz, new Date(snapped * 1000)) / 1000;
+  if (off2 === off1) return snapped;
+  return Math.floor((t + off2) / span) * span - off2;
+}
+
+/**
+ * Split [after, before) into pages of `spanHours` hours on the fixed grid above, so every
+ * boundary is a whole hour in `tz` (F2/§5.3: the backend min-max normalises motion per
+ * one-hour chunk counted from index 0 of the response, so two requests whose `after`
+ * differ by a fraction of an hour return different bar heights for the same timestamp)
+ * and the same page is always requested with the same `after` no matter how the user got
+ * there (see `snapToSpanGrid`).
  */
 export function pagesFor(
   after: number,
@@ -96,10 +121,7 @@ export function pagesFor(
 ): Page[] {
   const span = spanHours * HOUR;
   const out: Page[] = [];
-  // grid origin: the hour floor of `after`, snapped to the span grid relative to a tz day
-  const dayStart = startOfDayInTz(after, tz);
-  let cursor =
-    dayStart + Math.floor((floorHourInTz(after, tz) - dayStart) / span) * span;
+  let cursor = snapToSpanGrid(after, span, tz);
   while (cursor < before) {
     out.push({ after: cursor, before: cursor + span });
     cursor += span;

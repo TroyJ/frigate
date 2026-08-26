@@ -13,7 +13,7 @@ import { REVIEW_PADDING, ReviewSegment } from "@/types/review";
 import ReviewCard from "@/components/card/ReviewCard";
 import { useContinuousStrict } from "./ContinuousProvider";
 import { useItemWindow } from "./useItemWindow";
-import { startOfNextDayInTz } from "./timeAlign";
+import { indexAtOrAfter } from "./dayNav";
 
 type Props = {
   items: ReviewSegment[];
@@ -50,17 +50,10 @@ export function ContinuousEventList({
       ctx.registerSurface("events", {
         scrollToTime: (t, selectId) => {
           if (selectId && win.scrollToId(selectId)) return;
-          // D14: earliest item of the day containing t. Items are newest-first, so that is
-          // the LAST index whose start_time >= start of day … i.e. the first index whose
-          // start_time < next day start, scanned from the oldest end.
-          const nextDay = startOfNextDayInTz(t, ctx.tz);
-          let idx = -1;
-          for (let i = list.length - 1; i >= 0; i--) {
-            if (list[i].start_time < nextDay) {
-              idx = i;
-              break;
-            }
-          }
+          // one primitive for both callers (see dayNav.ts): a segment click passes the
+          // moment, a calendar day-jump passes 00:00 box time and gets D14's "the day's
+          // earliest review" from the same scan.
+          const idx = indexAtOrAfter(list, t);
           if (idx >= 0) win.scrollToIndex(idx, { align: "start" });
         },
       }),
