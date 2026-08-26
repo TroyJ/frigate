@@ -230,7 +230,18 @@ export function ContinuousProvider({ filter, children }: Props) {
           });
         })
         .catch((e) => {
-          if (isAbort(e)) return;
+          if (isAbort(e)) {
+            // never leave an aborted page stuck "loading" — it would count against the
+            // in-flight cap forever and freeze extension. Drop it; the grid effect
+            // re-requests it if it is still wanted.
+            setPages((prev) => {
+              if (prev.get(after)?.status !== "loading") return prev;
+              const next = new Map(prev);
+              next.delete(after);
+              return next;
+            });
+            return;
+          }
           setPages((prev) => {
             const next = new Map(prev);
             next.set(after, { after, before, status: "error", items: [] });
@@ -270,17 +281,22 @@ export function ContinuousProvider({ filter, children }: Props) {
     if (head) fetchPage(head.after, head.before, true);
   }, [now, tz, fetchPage]);
 
-  const isLoadingOlder = useMemo(
-    () => [...pages.values()].some((p) => p.status === "loading"),
+  const loadingCount = useMemo(
+    () => [...pages.values()].filter((p) => p.status === "loading").length,
     [pages],
   );
-  // One page at a time (F12): while a review page is still loading, a further
-  // loadOlder() is a no-op — K1/K2 will ask again on the next scroll/update tick.
-  const loadingRef = useRef(false);
-  loadingRef.current = isLoadingOlder;
+  const isLoadingOlder = loadingCount > 0;
+  // Bounded lookahead, NOT a hard "any page loading" freeze (which let one slow/stuck
+  // page halt the whole window — the ~31-day plateau). `/review` pages are cheap and the
+  // reviewQueue already caps real concurrency at 2 (F12 is about the motion endpoint,
+  // separately gated); this only stops `oldest` running more than MAX_INFLIGHT_PAGES
+  // ahead of what has started loading, so extension stays smooth and self-limiting.
+  const MAX_INFLIGHT_PAGES = 4;
+  const loadingCountRef = useRef(0);
+  loadingCountRef.current = loadingCount;
 
   const loadOlder = useCallback(() => {
-    if (loadingRef.current) return;
+    if (loadingCountRef.current >= MAX_INFLIGHT_PAGES) return;
     setOldest((prev) => {
       if (prev <= floor) return prev;
       return Math.max(
