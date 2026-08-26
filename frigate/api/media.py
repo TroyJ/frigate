@@ -641,17 +641,73 @@ async def recordings(
     return JSONResponse(content=list(recordings))
 
 
+def compute_no_recording_segments(
+    recordings: list[tuple[float, float]], after: float, before: float, scale: float
+) -> list[dict[str, int]]:
+    """Return the gaps in ``recordings`` between ``after`` and ``before``, quantised to
+    ``scale``-second segments, as ``[{"start_time", "end_time"}, ...]``.
+
+    Exactly the same output as upstream's per-segment ``any(...)`` scan, but O(n + steps):
+    ``recordings`` must be sorted by start time; a segment ``[cur, cur+scale)`` has a
+    recording iff some recording with ``start < cur+scale`` also has ``end > cur``, and
+    because starts are sorted that prefix only ever grows, so the running maximum of
+    ``end`` over the prefix answers the question in O(1) per segment.
+    """
+    no_recording_segments: list[dict[str, int]] = []
+    current = after
+    current_gap_start = None
+    idx = 0
+    n = len(recordings)
+    max_end = float("-inf")
+
+    while current < before:
+        segment_end = min(current + scale, before)
+
+        while idx < n and recordings[idx][0] < segment_end:
+            if recordings[idx][1] > max_end:
+                max_end = recordings[idx][1]
+            idx += 1
+
+        has_recording = max_end > current
+
+        if not has_recording:
+            if current_gap_start is None:
+                current_gap_start = current
+        elif current_gap_start is not None:
+            no_recording_segments.append(
+                {"start_time": int(current_gap_start), "end_time": int(current)}
+            )
+            current_gap_start = None
+
+        current = segment_end
+
+    if current_gap_start is not None:
+        no_recording_segments.append(
+            {"start_time": int(current_gap_start), "end_time": int(before)}
+        )
+
+    return no_recording_segments
+
+
 @router.get(
     "/recordings/unavailable",
     response_model=list[dict],
     dependencies=[Depends(allow_any_authenticated())],
 )
-async def no_recordings(
+def no_recordings(
     request: Request,
     params: MediaRecordingsAvailabilityQueryParams = Depends(),
     allowed_cameras: List[str] = Depends(get_allowed_cameras_for_filter),
 ):
-    """Get time ranges with no recordings."""
+    """Get time ranges with no recordings.
+
+    fork: this handler is deliberately a plain ``def`` (FastAPI runs it in the threadpool)
+    and uses :func:`compute_no_recording_segments`. Upstream had it as ``async def`` with an
+    O(segments x recordings) scan on the event loop: 7 s per camera-day, 34 s for three days,
+    and while it ran uvicorn could not answer nginx's /auth subrequest - so the Supervisor
+    watchdog probe failed and the add-on was killed (exit 137, observed twice on 2026-08-26).
+    See bali-home-assistant docs/work/frigate-infinite-timeline-handover.md F12 / F21.
+    """
     cameras = params.cameras
     if cameras != "all":
         requested = set(unquote(cameras).split(","))
@@ -685,43 +741,12 @@ async def no_recordings(
         .iterator()
     )
 
-    # Convert recordings to list of (start, end) tuples
+    # Convert recordings to list of (start, end) tuples (already sorted by start_time)
     recordings = [(r["start_time"], r["end_time"]) for r in data]
 
-    # Iterate through time segments and check if each has any recording
-    no_recording_segments = []
-    current = after
-    current_gap_start = None
-
-    while current < before:
-        segment_end = min(current + scale, before)
-
-        # Check if this segment overlaps with any recording
-        has_recording = any(
-            rec_start < segment_end and rec_end > current
-            for rec_start, rec_end in recordings
-        )
-
-        if not has_recording:
-            # This segment has no recordings
-            if current_gap_start is None:
-                current_gap_start = current  # Start a new gap
-        else:
-            # This segment has recordings
-            if current_gap_start is not None:
-                # End the current gap and append it
-                no_recording_segments.append(
-                    {"start_time": int(current_gap_start), "end_time": int(current)}
-                )
-                current_gap_start = None
-
-        current = segment_end
-
-    # Append the last gap if it exists
-    if current_gap_start is not None:
-        no_recording_segments.append(
-            {"start_time": int(current_gap_start), "end_time": int(before)}
-        )
+    no_recording_segments = compute_no_recording_segments(
+        recordings, after, before, scale
+    )
 
     return JSONResponse(content=no_recording_segments)
 
