@@ -16,19 +16,18 @@ import {
   useRef,
   useState,
 } from "react";
-import { isDesktop, isMobile, isMobileOnly } from "react-device-detect";
-import { useTranslation } from "react-i18next";
+import { isDesktop, isMobileOnly } from "react-device-detect";
 import { cn } from "@/lib/utils";
 import { REVIEW_PADDING, ReviewSegment, ZoomLevel } from "@/types/review";
 import { TimeRange, TimelineType } from "@/types/timeline";
 import { useTimelineZoom } from "@/hooks/use-timeline-zoom";
-import DetailStream from "@/components/timeline/DetailStream";
-import ReviewCard from "@/components/card/ReviewCard";
 import {
   GenAISummaryChip,
   GenAISummaryDialog,
 } from "@/components/overlay/chip/GenAISummaryChip";
 import { ContinuousMotionStrip } from "./ContinuousMotionStrip";
+import { ContinuousEventList } from "./ContinuousEventList";
+import { ContinuousDetailStream } from "./ContinuousDetailStream";
 import { useContinuousStrict } from "./ContinuousProvider";
 
 export type ContinuousTimelinePanelProps = {
@@ -70,7 +69,6 @@ export function ContinuousTimelinePanel({
   setExportRange,
   onAnalysisOpen,
 }: ContinuousTimelinePanelProps) {
-  const { t } = useTranslation(["views/events"]);
   const ctx = useContinuousStrict();
   const internalTimelineRef = useRef<HTMLDivElement>(null);
   const selectedTimelineRef = timelineRef || internalTimelineRef;
@@ -175,46 +173,22 @@ export function ContinuousTimelinePanel({
           currentZoomLevel={currentZoomLevel}
         />
       ) : timelineType == "detail" ? (
-        <DetailStream
+        <ContinuousDetailStream
+          items={items}
           currentTime={currentTime}
+          isPlaying={isPlaying}
           onSeek={(timestamp, play) =>
             manuallySetCurrentTime(timestamp, play ?? true)
           }
-          reviewItems={items}
-          isPlaying={isPlaying}
         />
       ) : (
-        <div className="scrollbar-container h-full overflow-auto bg-secondary">
-          <div
-            className={cn(
-              "scrollbar-container grid h-auto grid-cols-1 gap-4 overflow-auto p-4",
-              isMobile && "sm:portrait:grid-cols-2",
-            )}
-          >
-            {items.length === 0 ? (
-              <div className="mt-5 text-center text-primary">
-                {t("events.noFoundForTimePeriod")}
-              </div>
-            ) : (
-              items
-                .filter((r) => r.severity !== "significant_motion")
-                .map((review) => (
-                  <div key={review.id} className="aspect-video w-full">
-                    <ReviewCard
-                      event={review}
-                      activeReviewItem={active}
-                      onClick={() =>
-                        manuallySetCurrentTime(
-                          review.start_time - REVIEW_PADDING,
-                          true,
-                        )
-                      }
-                    />
-                  </div>
-                ))
-            )}
-          </div>
-        </div>
+        <ContinuousEventList
+          items={items}
+          activeReviewItem={active}
+          onSelect={(review) =>
+            manuallySetCurrentTime(review.start_time - REVIEW_PADDING, true)
+          }
+        />
       )}
     </div>
   );
