@@ -113,7 +113,7 @@ type Props = {
 };
 
 export function ContinuousProvider({ filter, children }: Props) {
-  const [enabled] = useContinuousEnabled();
+  const [enabled, setEnabled, toggleLoaded] = useContinuousEnabled();
   const { data: config } = useSWR<FrigateConfig>("config");
   const tz =
     useTimezone(config) ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -389,7 +389,6 @@ export function ContinuousProvider({ filter, children }: Props) {
   );
 
   // console escape hatch for bring-up: frigateContinuous(false)
-  const [, setEnabled] = useContinuousEnabled();
   useEffect(() => {
     (
       window as unknown as { frigateContinuous: (v: boolean) => void }
@@ -442,6 +441,12 @@ export function ContinuousProvider({ filter, children }: Props) {
     ],
   );
 
+  // The toggle is read from IndexedDB asynchronously. RecordingView initialises
+  // `selectedRangeIdx` from whichever chunk list it sees at MOUNT, so children must not
+  // mount until we know which list that is — otherwise an index into upstream's 24-chunk
+  // list is later applied to the fork's retention-wide list (observed: the player opened
+  // a chunk from a year earlier). Also stops upstream's Timeline firing its heavy calls.
+  if (!toggleLoaded) return null;
   return (
     <ContinuousContext.Provider value={value}>
       {children}
