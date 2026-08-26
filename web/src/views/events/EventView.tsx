@@ -142,6 +142,10 @@ export default function EventView({
   );
   const markManyReviewed = useCallback(
     (items: ReviewSegment[]) => {
+      // CAUTION (currently unreachable, a trap for the next caller): this patches EVERY id,
+      // while `markAllItemsAsReviewed` filters `end_time` before posting. Hand it an
+      // in-progress review and the card flips locally but the server never hears about it.
+      // Every present caller pre-filters, so keep doing that rather than relying on this.
       patchContinuous?.(
         items.map((i) => i.id),
         { has_been_reviewed: true },
@@ -149,6 +153,24 @@ export default function EventView({
       markAllItemsAsReviewed(items);
     },
     [markAllItemsAsReviewed, patchContinuous],
+  );
+
+  // The selection toolbar (ReviewActionGroup) posts `reviews/viewed` / `reviews/delete`
+  // itself and then calls `pullLatestData()`, which refreshes the 24 h SWR window — not the
+  // provider. It is on screen for exactly the D18 Ctrl+A flow, so without these the toolbar
+  // left stale cards (mark) and ghost cards (delete) in the grid at depth.
+  const onToolbarReviewedChange = useCallback(
+    (ids: string[], reviewed: boolean) => {
+      patchContinuous?.(ids, { has_been_reviewed: reviewed });
+    },
+    [patchContinuous],
+  );
+  const removeContinuous = continuous.enabled ? continuous.removeReviews : null;
+  const onToolbarDeleted = useCallback(
+    (ids: string[]) => {
+      removeContinuous?.(ids);
+    },
+    [removeContinuous],
   );
 
   // review counts
@@ -487,6 +509,10 @@ export default function EventView({
             setSelectedReviews={setSelectedReviews}
             onExport={exportReview}
             pullLatestData={pullLatestData}
+            onReviewedChange={
+              continuous.enabled ? onToolbarReviewedChange : undefined
+            }
+            onDeleted={continuous.enabled ? onToolbarDeleted : undefined}
           />
         )}
       </div>

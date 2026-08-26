@@ -129,9 +129,14 @@ export function ContinuousEventStrip({
     (segmentTime: number, ifNeeded?: boolean, behavior?: ScrollBehavior) => {
       const index = Math.round((startAligned - segmentTime) / segmentDuration);
       if (index < 0 || index >= count) return;
-      // `ifNeeded` defaults ON here: every caller left is either the drag handler (which
-      // wants "keep the handle visible") or the minimap follow. An unconditional centring
-      // scroll fights the user.
+      // `ifNeeded` defaults ON here, and that IS a behaviour change beyond the minimap
+      // follow: upstream's `useDraggableElement` calls `scrollToSegment(t)` with no second
+      // argument in five places (drag move, the handlebar follow, and three collapsed-
+      // timeline paths) and upstream treated that as "always centre". With `ifNeeded` the
+      // scroll is skipped while the target is inside the viewport minus a 20-row (160 px)
+      // guard band at each edge — i.e. exactly when centring would have been a visible
+      // yank for no reason — and still fires as the handle approaches an edge, which is
+      // the case that matters. Revisit if dragging ever feels like it stops following.
       win.scrollToIndex(index, { ifNeeded: ifNeeded ?? true, behavior });
     },
     [startAligned, segmentDuration, count, win],
