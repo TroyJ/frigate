@@ -98,7 +98,12 @@ export class FetchQueue {
       this.running.set(job.key, job);
       job
         .run(job.controller.signal)
-        .then(job.resolve, job.reject)
+        // late-bound on purpose: a duplicate enqueue() wraps job.resolve after the
+        // job has already started, and must still be notified
+        .then(
+          (v) => job.resolve(v),
+          (e) => job.reject(e),
+        )
         .finally(() => {
           this.running.delete(job.key);
           this.inflight.delete(job.key);

@@ -55,6 +55,43 @@ export function buildSegmentEventIndex(
   return { closed, open };
 }
 
+export type SegmentEventIndex = ReturnType<typeof buildSegmentEventIndex>;
+
+/** Pure lookup: the events upstream's helpers would find at t, t-d and t+d. */
+export function lookupSegmentEvents(
+  index: SegmentEventIndex,
+  segmentTime: number,
+  segmentDuration: number,
+): ReviewSegment[] {
+  const { closed, open } = index;
+  // ±1 segment because shouldShowRoundedCorners probes the neighbours (§4A.4)
+  const a = closed.get(segmentTime - segmentDuration);
+  const b = closed.get(segmentTime);
+  const c = closed.get(segmentTime + segmentDuration);
+  if (!a && !b && !c && !open.length) return EMPTY;
+  const out: ReviewSegment[] = [];
+  const seen = new Set<string>();
+  for (const bucket of [a, b, c]) {
+    if (!bucket) continue;
+    for (const e of bucket) {
+      if (!seen.has(e.id)) {
+        seen.add(e.id);
+        out.push(e);
+      }
+    }
+  }
+  for (const e of open) {
+    // an open-ended review spans from its start to "now": include it for every
+    // segment at or after its (aligned) start, minus one neighbour probe
+    const start = Math.floor(e.start_time / segmentDuration) * segmentDuration;
+    if (segmentTime + segmentDuration >= start && !seen.has(e.id)) {
+      seen.add(e.id);
+      out.push(e);
+    }
+  }
+  return out.length ? out : EMPTY;
+}
+
 export function useSegmentEventIndex(
   events: ReviewSegment[],
   segmentDuration: number,
@@ -63,40 +100,9 @@ export function useSegmentEventIndex(
     () => buildSegmentEventIndex(events, segmentDuration),
     [events, segmentDuration],
   );
-
   return useCallback(
-    (segmentTime: number): ReviewSegment[] => {
-      const { closed, open } = index;
-      // ±1 segment because shouldShowRoundedCorners probes the neighbours (§4A.4)
-      const a = closed.get(segmentTime - segmentDuration);
-      const b = closed.get(segmentTime);
-      const c = closed.get(segmentTime + segmentDuration);
-      let out: ReviewSegment[] | undefined;
-      if (a || b || c || open.length) {
-        out = [];
-        const seen = new Set<string>();
-        for (const bucket of [a, b, c]) {
-          if (!bucket) continue;
-          for (const e of bucket) {
-            if (!seen.has(e.id)) {
-              seen.add(e.id);
-              out.push(e);
-            }
-          }
-        }
-        for (const e of open) {
-          // an open-ended review spans from its start to "now": include it for every
-          // segment at or after its (aligned) start, minus one neighbour probe
-          const start =
-            Math.floor(e.start_time / segmentDuration) * segmentDuration;
-          if (segmentTime + segmentDuration >= start && !seen.has(e.id)) {
-            seen.add(e.id);
-            out.push(e);
-          }
-        }
-      }
-      return out && out.length ? out : EMPTY;
-    },
+    (segmentTime: number) =>
+      lookupSegmentEvents(index, segmentTime, segmentDuration),
     [index, segmentDuration],
   );
 }
