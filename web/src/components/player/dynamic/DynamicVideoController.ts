@@ -24,6 +24,7 @@ export class DynamicVideoController {
   private inpointOffset: number = 0;
   private annotationOffset: number;
   private timeToStart: number | undefined = undefined;
+  private timeToStartPlay: boolean = false;
 
   constructor(
     camera: string,
@@ -52,8 +53,14 @@ export class DynamicVideoController {
     );
 
     if (this.timeToStart) {
-      this.seekToTimestamp(this.timeToStart);
+      // fork (upstream bug): a seek deferred because its chunk was not loaded yet lost the
+      // caller's PLAY intent here — `seekToTimestamp` defaults `play` to false, so the
+      // deferred seek always landed paused. Unreachable while the chunk list covered the
+      // whole retained range; with the sliding ±N h window (§9.5) it is the normal path for
+      // any deep seek, which then buffered the right hour and sat at 0:00 paused.
+      this.seekToTimestamp(this.timeToStart, this.timeToStartPlay);
       this.timeToStart = undefined;
+      this.timeToStartPlay = false;
     }
   }
 
@@ -72,6 +79,7 @@ export class DynamicVideoController {
   seekToTimestamp(time: number, play: boolean = false) {
     if (time < this.timeRange.after || time > this.timeRange.before) {
       this.timeToStart = time;
+      this.timeToStartPlay = play; // see newPlayback: the intent must survive the defer
       return;
     }
 
@@ -98,8 +106,11 @@ export class DynamicVideoController {
       } else {
         this.playerController.pause();
       }
-    } else {
-      // no op
+    } else if (play) {
+      // fork: landing exactly at position 0 of a chunk is a legitimate outcome (a seek to
+      // the first frame of the hour). Upstream's "no op" left it paused, which reads as a
+      // broken player rather than as a deliberate stop.
+      this.waitAndPlay();
     }
   }
 

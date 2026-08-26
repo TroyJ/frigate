@@ -380,8 +380,33 @@ export function RecordingView({
     if (idx !== -1) {
       setPlaybackStart(currentTime);
       setSelectedRangeIdx(idx);
+      forkPendingSeek.current = currentTime;
     }
   }, [chunkedTimeRange, currentTime, currentTimeRange, continuous.enabled]);
+
+  // …and then actually PLAY it. Upstream seeks-and-plays in the effect keyed on
+  // `currentTime`, which by definition has already run and found the chunk missing — it
+  // never fires again, because `currentTime` does not change a second time. Before the
+  // sliding window that never happened (the chunk was always already in the list), so a
+  // deep seek now loaded the right hour, buffered it fully, and sat there PAUSED at 0:00 —
+  // measured: readyState 4, videoWidth 2880, buffered [0, 138.8], paused true.
+  // One call is enough: if the controller has not picked up the new hour yet (its
+  // `recordings` arrive in a fetch after this commit) it stores the seek and replays it
+  // from `newPlayback` — WITH the play intent, which DynamicVideoController now preserves.
+  const forkPendingSeek = useRef<number>();
+  useEffect(() => {
+    const target = forkPendingSeek.current;
+    if (!continuous.enabled || target === undefined) return;
+    if (
+      !currentTimeRange ||
+      currentTimeRange.after > target ||
+      currentTimeRange.before < target
+    ) {
+      return;
+    }
+    forkPendingSeek.current = undefined;
+    mainControllerRef.current?.seekToTimestamp(target, true);
+  }, [currentTimeRange, continuous.enabled]);
 
   useEffect(() => {
     if (!scrubbing) {
