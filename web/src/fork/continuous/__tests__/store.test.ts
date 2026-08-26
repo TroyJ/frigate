@@ -39,6 +39,15 @@ describe("mergeReviews", () => {
     expect(out).toHaveLength(3);
   });
 
+  it("an override with an UNKNOWN id is an insert — this is how the live tail adds items", () => {
+    // §9.4: a WebSocket `new` arrives before any page contains it. mergeReviews must treat
+    // it as an insert, not ignore it, or nothing ever appears without a refetch.
+    const overrides = new Map([["z", mk("z", 350)]]);
+    const out = mergeReviews(pages, overrides, new Set());
+    // and it lands in D23 order, not appended: z is the newest
+    expect(out.map((r) => r.id)).toEqual(["z", "a", "b", "c"]);
+  });
+
   it("drops removed ids — the delete tombstone", () => {
     // a deleted review is gone from the server, but the pages already in memory still
     // hold it; without the tombstone the toolbar's delete leaves a ghost card.

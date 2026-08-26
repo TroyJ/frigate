@@ -25,11 +25,16 @@ import {
   ZoomLevel,
 } from "@/types/review";
 import { getChunkedTimeDay } from "@/utils/timelineUtil";
-import { ContinuousTimelinePanel, useContinuous } from "@/fork/continuous";
+import {
+  ContinuousTimelinePanel,
+  describeMissingFootage,
+  useContinuous,
+} from "@/fork/continuous";
 import {
   MutableRefObject,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -181,6 +186,41 @@ export function RecordingView({
     [selectedRangeIdx, chunkedTimeRange],
   );
 
+  // fork (Phase 6 / §9.5): the continuous chunk list SLIDES, and `selectedRangeIdx` is a
+  // positional index into it. When the window re-anchors, the same index means a different
+  // hour, so the player would silently re-point. Re-resolve the index against the new list
+  // in a layout effect — before paint, and before any effect keyed on `currentTimeRange`
+  // fires a request for the wrong range.
+  const prevChunksRef = useRef(chunkedTimeRange);
+  useLayoutEffect(() => {
+    if (!continuous.enabled) {
+      prevChunksRef.current = chunkedTimeRange;
+      return;
+    }
+    const prevList = prevChunksRef.current;
+    if (prevList === chunkedTimeRange) return;
+    prevChunksRef.current = chunkedTimeRange;
+    const prev = prevList[selectedRangeIdx];
+    if (!prev) return;
+    const idx = chunkedTimeRange.findIndex(
+      (c) => c.after <= prev.after && c.before > prev.after,
+    );
+    if (idx !== -1 && idx !== selectedRangeIdx) {
+      setSelectedRangeIdx(idx);
+    }
+  }, [chunkedTimeRange, continuous.enabled, selectedRangeIdx]);
+
+  // fork (D21): a blip past the recording tail still seeks; say WHY there is no video
+  // instead of showing a blank player (§14.1a — an inference from the retention horizon,
+  // not a recorded reason).
+  const noFootageMessage = useMemo(() => {
+    if (!continuous.enabled) return undefined;
+    return describeMissingFootage(
+      currentTimeRange?.after ?? 0,
+      continuous.extent.oldestRecording,
+    ).text;
+  }, [continuous, currentTimeRange]);
+
   const reviewFilterList = useMemo(() => {
     const uniqueLabels = new Set<string>();
 
@@ -316,6 +356,32 @@ export function RecordingView({
     },
     [currentTimeRange, updateSelectedSegment],
   );
+
+  // fork (Q3=A / §14.3): seeking into a region the chunk window does not cover yet.
+  // `updateSelectedSegment` resolves the playhead by `findIndex` over `chunkedTimeRange`
+  // and, on -1, silently drops the seek. That was unreachable while the fork handed over
+  // the WHOLE retained range; with the sliding ±N h window (§9.5) it is the normal case for
+  // any jump further than the window is wide — clicking a three-day-old blip, for one.
+  // The panel reports the playhead to the provider, the provider re-anchors the window
+  // around it, and this resolves the index once the new list arrives: auto-load, then apply
+  // the seek. Without it, deep seeks do nothing at all.
+  useEffect(() => {
+    if (!continuous.enabled || !currentTime) return;
+    if (
+      currentTimeRange &&
+      currentTimeRange.after <= currentTime &&
+      currentTimeRange.before >= currentTime
+    ) {
+      return;
+    }
+    const idx = chunkedTimeRange.findIndex(
+      (c) => c.after <= currentTime && c.before > currentTime,
+    );
+    if (idx !== -1) {
+      setPlaybackStart(currentTime);
+      setSelectedRangeIdx(idx);
+    }
+  }, [chunkedTimeRange, currentTime, currentTimeRange, continuous.enabled]);
 
   useEffect(() => {
     if (!scrubbing) {
@@ -780,6 +846,7 @@ export function RecordingView({
                   onControllerReady={(controller) => {
                     mainControllerRef.current = controller;
                   }}
+                  emptyMessage={noFootageMessage}
                   isScrubbing={scrubbing || exportMode == "timeline"}
                   supportsFullscreen={supportsFullScreen}
                   setFullResolution={setFullResolution}

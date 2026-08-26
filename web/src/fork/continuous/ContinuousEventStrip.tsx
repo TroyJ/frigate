@@ -214,6 +214,7 @@ export function ContinuousEventStrip({
   useEffect(
     () =>
       ctx.registerSurface("strip", {
+        scrollToTop: () => win.scrollToIndex(0, { align: "start" }),
         scrollToTime: (t) => {
           const dayStart = startOfDayInTz(t, ctx.tz);
           const index = Math.round(
@@ -227,6 +228,9 @@ export function ContinuousEventStrip({
       }),
     [ctx, startAligned, segmentDuration, count, win],
   );
+
+  const reportAtTop = ctx.reportAtTop;
+  useEffect(() => reportAtTop(win.stickToTop), [reportAtTop, win.stickToTop]);
 
   const rows = useMemo(() => {
     const out: number[] = [];

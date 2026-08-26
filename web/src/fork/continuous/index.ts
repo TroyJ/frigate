@@ -6,4 +6,7 @@ export { ContinuousReviewGrid } from "./ContinuousReviewGrid";
 export type { VisibleReviewRange } from "./ContinuousReviewGrid";
 export { ContinuousEventStrip } from "./ContinuousEventStrip";
 export { ContinuousMotionStrip } from "./ContinuousMotionStrip";
+export { ContinuousNewChip } from "./ContinuousNewChip";
 export { selectReviewItems } from "./selectReviews";
+export { describeMissingFootage } from "./footage";
+export { dayWindowFor } from "./dayNav";

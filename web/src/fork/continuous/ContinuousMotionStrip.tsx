@@ -138,6 +138,7 @@ export function ContinuousMotionStrip({
     motionScale: Math.round(segmentDuration / 2),
     unavailScale: Math.round(segmentDuration),
     visible: visibleRange,
+    tailTick: ctx.now,
   });
 
   const { getMotionSegmentValue } = useMotionSegmentUtils(
@@ -185,6 +186,7 @@ export function ContinuousMotionStrip({
   useEffect(
     () =>
       ctx.registerSurface(surface, {
+        scrollToTop: () => win.scrollToIndex(0, { align: "start" }),
         scrollToTime: (t) => {
           const index = Math.round((startAligned - t) / segmentDuration);
           win.scrollToIndex(Math.max(0, Math.min(count - 1, index)), {
@@ -194,6 +196,17 @@ export function ContinuousMotionStrip({
       }),
     [ctx, surface, startAligned, segmentDuration, count, win],
   );
+
+  const reportAtTop = ctx.reportAtTop;
+  useEffect(() => reportAtTop(win.stickToTop), [reportAtTop, win.stickToTop]);
+
+  // The Review page's motion tab owns its own playhead; tell the provider so the playback
+  // chunk window follows it (§9.5). On History the panel reports instead.
+  const reportPlayhead = ctx.reportPlayhead;
+  useEffect(() => {
+    if (surface !== "motion" || handlebarTime === undefined) return;
+    reportPlayhead(handlebarTime);
+  }, [surface, handlebarTime, reportPlayhead]);
 
   // sparse (motionOnly) mode: keep the pitch, filter which rows draw (S3)
   const rows = useMemo(() => {

@@ -32,6 +32,7 @@ import {
   MutableRefObject,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -45,7 +46,7 @@ import { useContinuousStrict } from "./ContinuousProvider";
 import { useItemWindow } from "./useItemWindow";
 import { indexAtOrAfter } from "./dayNav";
 
-/** Card height estimate: 16:9 thumbnail + the caption row, at ~1/3 of a desktop viewport. */
+/** Fallback until a row has been measured once (see `rowHeight` below). */
 const CARD_ESTIMATE = 240;
 const GAP = 16;
 
@@ -110,15 +111,62 @@ export function ContinuousReviewGrid({
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
+  /**
+   * Every card in this grid is the SAME height — an `aspect-video` box at the lane width —
+   * so the grid can be fixed-pitch like K1 instead of measured like a real variable-height
+   * list. That matters for §9.2: with `measureElement` the virtualizer applies a row's real
+   * height in a LATER commit and adjusts the scroll offset itself, which fights the anchor
+   * compensation in useItemWindow and left the view tens of pixels out on every burst of
+   * arrivals. Measuring ONE row and pinning every row to that height removes the estimate
+   * error entirely, so the compensation is exact.
+   *
+   * Measured rather than computed from the aspect ratio because the paddings and the
+   * caption row are upstream's business, not ours to duplicate.
+   */
+  const [rowHeight, setRowHeight] = useState(CARD_ESTIMATE);
+  const probeRef = useRef<HTMLDivElement | null>(null);
+  useLayoutEffect(() => {
+    const node = probeRef.current;
+    if (!node) return;
+    const measure = () => {
+      const h = node.getBoundingClientRect().height;
+      if (h > 0) setRowHeight((prev) => (Math.abs(prev - h) < 1 ? prev : h));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(node);
+    return () => ro.disconnect();
+  }, [columns, items.length]);
+
+  /**
+   * Virtualize by ROW, not by card, and do not use the virtualizer's `lanes`.
+   *
+   * `lanes` packs masonry-style — each item goes to the shortest lane — so inserting one
+   * card at the head does not shift everything down by a predictable amount; items move
+   * BETWEEN lanes and their offsets change at different commits. Measured: after three
+   * arrivals the card at the top of the viewport had not moved at all while the card in the
+   * middle had moved a full row, so no single scroll correction can hold the view still.
+   * Grouping into fixed rows first makes the layout index-major and the shift exactly
+   * `ceil((head + n) / columns) - ceil(head / columns)` rows — which the anchor
+   * compensation in `useItemWindow` then cancels exactly.
+   */
+  const rows = useMemo(() => {
+    const out: { id: string; cards: ReviewSegment[] }[] = [];
+    for (let i = 0; i < items.length; i += columns) {
+      const cards = items.slice(i, i + columns);
+      out.push({ id: cards[0].id, cards });
+    }
+    return out;
+  }, [items, columns]);
+
   const onNearEnd = useCallback(() => ctx.loadOlder(), [ctx]);
-  const estimate = useCallback(() => CARD_ESTIMATE, []);
+  const estimate = useCallback(() => rowHeight, [rowHeight]);
   const win = useItemWindow({
     scrollRef: contentRef as MutableRefObject<HTMLDivElement>,
-    items,
+    items: rows,
     estimateSize: estimate,
     gap: GAP,
     onNearEnd,
-    lanes: columns,
   });
 
   // --- S1 ⇄ S2 coupling: which items are actually on screen (see header) --------------
@@ -137,8 +185,8 @@ export function ContinuousReviewGrid({
     for (const v of virtualItems) {
       // overscanned rows are rendered but not visible — they must not widen the band
       if (v.start + v.size <= top || v.start >= bottom) continue;
-      const item = items[v.index];
-      if (item) timestamps.push(item.start_time);
+      for (const card of rows[v.index]?.cards ?? [])
+        timestamps.push(card.start_time);
     }
     if (!timestamps.length) return;
     const range: VisibleReviewRange = {
@@ -152,24 +200,49 @@ export function ContinuousReviewGrid({
     if (key === reportRef.current) return;
     reportRef.current = key;
     onVisibleChange(range);
-  }, [virtualItems, items, contentRef, onVisibleChange]);
+  }, [virtualItems, rows, contentRef, onVisibleChange]);
+
+  // §9.3: pinned to the newest edge? The chip is meaningless there and the provider clears
+  // its counter. STICK_THRESHOLD is in useItemWindow; one card height is far too coarse.
+  const reportAtTop = ctx.reportAtTop;
+  useEffect(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    const onScroll = () => reportAtTop(el.scrollTop < 24);
+    onScroll();
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [contentRef, reportAtTop, items.length]);
 
   // --- navigation registry (§2A.3 / D14) ---------------------------------------------
   useEffect(
     () =>
       ctx.registerSurface("grid", {
+        scrollToTop: () => {
+          // `behavior: "smooth"` loses races here: clearing the chip re-renders the
+          // provider and the grid mid-animation and Chrome abandons the scroll partway.
+          // "Go to now" should be instant anyway.
+          const el = contentRef.current;
+          if (el) el.scrollTop = 0;
+        },
         scrollToTime: (t, selectId) => {
-          if (selectId && win.scrollToId(selectId)) return;
+          // indices are ROWS now, so an item index has to be divided down to its row
+          if (selectId) {
+            const i = items.findIndex((it) => it.id === selectId);
+            if (i >= 0) {
+              win.scrollToIndex(Math.floor(i / columns), { align: "start" });
+              return;
+            }
+          }
           // see dayNav.ts: one scan serves both a strip-segment click (pass the moment)
           // and a calendar day-jump (pass 00:00 box time → D14's day's-earliest-review).
           const idx = indexAtOrAfter(items, t);
-          if (idx >= 0) win.scrollToIndex(idx, { align: "start" });
+          if (idx >= 0)
+            win.scrollToIndex(Math.floor(idx / columns), { align: "start" });
         },
       }),
-    [ctx, win, items],
+    [ctx, win, items, columns, contentRef],
   );
-
-  const lanePct = 100 / columns;
 
   return (
     <div
@@ -177,52 +250,69 @@ export function ContinuousReviewGrid({
       style={{ height: `${win.virtualizer.getTotalSize()}px` }}
     >
       {virtualItems.map((v) => {
-        const review = items[v.index];
-        if (!review) return null;
-        const selected = selectedIds.has(review.id);
+        const row = rows[v.index];
+        if (!row) return null;
         return (
           <div
             key={v.key}
-            ref={win.virtualizer.measureElement}
+            // fixed pitch: NOT `virtualizer.measureElement`. See `rowHeight` above — the
+            // measurement feedback loop is what made §9.2 compensation inexact here.
+            ref={v.index === virtualItems[0]?.index ? probeRef : undefined}
             data-index={v.index}
-            data-start={review.start_time}
-            // upstream's copied EventSegment finds this card by
-            // `[data-segment-start="<segStart - segmentDuration>"]` to flash its ring when
-            // a strip segment is clicked. Keep the attribute so that still works for cards
-            // that happen to be mounted; the SCROLL half of that interaction cannot rely on
-            // it under virtualization and goes through navigateToTime instead (see
-            // ContinuousEventStrip).
-            data-segment-start={
-              Math.floor(review.start_time / segmentDuration) *
-                segmentDuration -
-              segmentDuration
-            }
-            className="review-item absolute top-0 rounded-lg px-1 md:px-2"
+            className="absolute inset-x-0 top-0 flex"
             style={{
               transform: `translateY(${v.start}px)`,
-              left: `${(v.lane ?? 0) * lanePct}%`,
-              width: `${lanePct}%`,
+              height: `${rowHeight}px`,
             }}
           >
-            <div className="aspect-video overflow-hidden rounded-lg">
-              <PreviewThumbnailPlayer
-                review={review}
-                allPreviews={relevantPreviews}
-                timeRange={timeRange}
-                setReviewed={markItemAsReviewed}
-                scrollLock={scrollLock}
-                onTimeUpdate={onPreviewTimeUpdate}
-                onClick={(r, ctrl, detail) => onSelectReview(r, ctrl, detail)}
-              />
-            </div>
-            <div
-              className={cn(
-                "review-item-ring pointer-events-none absolute inset-0 z-10 size-full rounded-lg outline outline-[3px] -outline-offset-[2.8px]",
-                selected
-                  ? `outline-severity_${review.severity} shadow-severity_${review.severity}`
-                  : "outline-transparent duration-500",
-              )}
-            />
+            {row.cards.map((review) => {
+              const selected = selectedIds.has(review.id);
+              return (
+                <div
+                  key={review.id}
+                  // §9.2 anchor: this must be on the CARD, not the row. Row ids are derived
+                  // from their first card, so every insertion renames every row and the
+                  // anchor would never be found again — measured as "no compensation at
+                  // all", a full row of jump. A card id is stable for the item's life.
+                  data-continuous-id={review.id}
+                  data-start={review.start_time}
+                  // upstream's copied EventSegment finds this card by
+                  // `[data-segment-start="<segStart - segmentDuration>"]` to flash its ring
+                  // when a strip segment is clicked. Keep the attribute so that still works
+                  // for cards that happen to be mounted; the SCROLL half of that
+                  // interaction goes through navigateToTime (see ContinuousEventStrip).
+                  data-segment-start={
+                    Math.floor(review.start_time / segmentDuration) *
+                      segmentDuration -
+                    segmentDuration
+                  }
+                  className="review-item relative h-full rounded-lg px-1 md:px-2"
+                  style={{ width: `${100 / columns}%` }}
+                >
+                  <div className="aspect-video overflow-hidden rounded-lg">
+                    <PreviewThumbnailPlayer
+                      review={review}
+                      allPreviews={relevantPreviews}
+                      timeRange={timeRange}
+                      setReviewed={markItemAsReviewed}
+                      scrollLock={scrollLock}
+                      onTimeUpdate={onPreviewTimeUpdate}
+                      onClick={(rev, ctrl, detail) =>
+                        onSelectReview(rev, ctrl, detail)
+                      }
+                    />
+                  </div>
+                  <div
+                    className={cn(
+                      "review-item-ring pointer-events-none absolute inset-0 z-10 size-full rounded-lg outline outline-[3px] -outline-offset-[2.8px]",
+                      selected
+                        ? `outline-severity_${review.severity} shadow-severity_${review.severity}`
+                        : "outline-transparent duration-500",
+                    )}
+                  />
+                </div>
+              );
+            })}
           </div>
         );
       })}
