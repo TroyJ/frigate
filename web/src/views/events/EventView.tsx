@@ -770,10 +770,10 @@ function DetectionReview({
           />
         )}
 
-        <div
-          className="grid w-full gap-2 px-1 sm:grid-cols-2 md:mx-2 md:grid-cols-3 md:gap-4 3xl:grid-cols-4"
-          ref={contentRef}
-        >
+        {/* fork (F8): contentRef must point at the scroll container above, not this
+            inner grid — every consumer (minimap observer root, scroll lock, the
+            scrollHeight check, NewReviewData's scrollTo) expects the scroller. */}
+        <div className="grid w-full gap-2 px-1 sm:grid-cols-2 md:mx-2 md:grid-cols-3 md:gap-4 3xl:grid-cols-4">
           {!loading && currentItems
             ? currentItems.map((value) => {
                 const selected = selectedReviews.some((r) => r.id === value.id);
