@@ -55,6 +55,22 @@ describe("mergeReviews", () => {
     expect(out.map((r) => r.id)).toEqual(["a", "c"]);
   });
 
+  it("a local patch survives a WebSocket replace (the un-review bug)", () => {
+    // §9.4: an `update`/`end`/`genai` carries the whole segment and does NOT carry
+    // has_been_reviewed. Applied last, the local patch keeps the card marked.
+    const overrides = new Map([["b", mk("b", 200, false)]]);
+    const patches = new Map([["b", { has_been_reviewed: true }]]);
+    const out = mergeReviews(pages, overrides, new Set(), patches);
+    expect(out.find((r) => r.id === "b")?.has_been_reviewed).toBe(true);
+  });
+
+  it("a patch for an id no page or override has is ignored, not inserted", () => {
+    const patches = new Map([["ghost", { has_been_reviewed: true }]]);
+    expect(
+      mergeReviews(pages, new Map(), new Set(), patches).map((r) => r.id),
+    ).toEqual(["a", "b", "c"]);
+  });
+
   it("removal beats an override for the same id", () => {
     const overrides = new Map([["b", mk("b", 200, true)]]);
     expect(

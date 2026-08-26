@@ -174,11 +174,32 @@ export function RecordingView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [timeRange, continuous.enabled, continuous.enabled && continuous.chunks],
   );
-  const [selectedRangeIdx, setSelectedRangeIdx] = useState(
-    chunkedTimeRange.findIndex((chunk) => {
-      return chunk.after <= startTime && chunk.before >= startTime;
-    }),
-  );
+  // fork (Phase 6): `findIndex` returns -1 when `startTime` is outside the chunk list, and
+  // under the sliding ±6 h window that is the NORMAL case — opening History on anything
+  // older than six hours. -1 then means `currentTimeRange` silently falls back to the last
+  // chunk (the wrong hour: fetched, HLS-loaded, played), the re-anchor remap reads
+  // `prevList[-1]` and bails, and `onClipEnded` walks to index 0. Clamp to the nearest
+  // chunk instead; the Q3 effect below re-resolves it exactly once the window re-anchors.
+  const [selectedRangeIdx, setSelectedRangeIdx] = useState(() => {
+    const exact = chunkedTimeRange.findIndex(
+      (chunk) => chunk.after <= startTime && chunk.before >= startTime,
+    );
+    if (exact !== -1) return exact;
+    if (chunkedTimeRange.length === 0) return 0;
+    let nearest = 0;
+    let best = Infinity;
+    chunkedTimeRange.forEach((chunk, i) => {
+      const d = Math.min(
+        Math.abs(chunk.after - startTime),
+        Math.abs(chunk.before - startTime),
+      );
+      if (d < best) {
+        best = d;
+        nearest = i;
+      }
+    });
+    return nearest;
+  });
   const currentTimeRange = useMemo<TimeRange>(
     () =>
       chunkedTimeRange[selectedRangeIdx] ??
@@ -200,7 +221,7 @@ export function RecordingView({
     const prevList = prevChunksRef.current;
     if (prevList === chunkedTimeRange) return;
     prevChunksRef.current = chunkedTimeRange;
-    const prev = prevList[selectedRangeIdx];
+    const prev = prevList[selectedRangeIdx] ?? prevList[prevList.length - 1];
     if (!prev) return;
     const idx = chunkedTimeRange.findIndex(
       (c) => c.after <= prev.after && c.before > prev.after,
@@ -364,24 +385,35 @@ export function RecordingView({
   // any jump further than the window is wide — clicking a three-day-old blip, for one.
   // The panel reports the playhead to the provider, the provider re-anchors the window
   // around it, and this resolves the index once the new list arrives: auto-load, then apply
-  // the seek. Without it, deep seeks do nothing at all.
+  // the seek.
+  //
+  // The target is LATCHED in a ref rather than re-read from `currentTime` when the window
+  // finally arrives, and that is not defensive coding — it is the bug. The old chunk's
+  // player keeps calling `onTimestampUpdate` while all this happens, which writes its own
+  // position back into `currentTime`, so by the time the window had re-anchored the "target"
+  // had reverted to roughly now. Measured: `startTimestamp` arriving at the deep hour as
+  // 1787722819 (now) instead of 1787451420, `calculateSeekPosition` returning undefined for
+  // being out of range, and playback starting at 0:00 of the wrong-by-38-seconds hour.
+  const forkSeekTarget = useRef<number>();
   useEffect(() => {
     if (!continuous.enabled || !currentTime) return;
-    if (
-      currentTimeRange &&
-      currentTimeRange.after <= currentTime &&
-      currentTimeRange.before >= currentTime
-    ) {
-      return;
+    const inRange = (t: number) =>
+      !!currentTimeRange &&
+      currentTimeRange.after <= t &&
+      currentTimeRange.before >= t;
+    if (forkSeekTarget.current === undefined) {
+      if (inRange(currentTime)) return;
+      forkSeekTarget.current = currentTime;
     }
+    const target = forkSeekTarget.current;
     const idx = chunkedTimeRange.findIndex(
-      (c) => c.after <= currentTime && c.before > currentTime,
+      (c) => c.after <= target && c.before > target,
     );
-    if (idx !== -1) {
-      setPlaybackStart(currentTime);
-      setSelectedRangeIdx(idx);
-      forkPendingSeek.current = currentTime;
-    }
+    if (idx === -1) return; // the window has not re-anchored around it yet
+    forkSeekTarget.current = undefined;
+    setPlaybackStart(target);
+    setSelectedRangeIdx(idx);
+    forkPendingSeek.current = target;
   }, [chunkedTimeRange, currentTime, currentTimeRange, continuous.enabled]);
 
   // …and then actually PLAY it. Upstream seeks-and-plays in the effect keyed on

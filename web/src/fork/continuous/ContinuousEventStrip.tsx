@@ -230,7 +230,10 @@ export function ContinuousEventStrip({
   );
 
   const reportAtTop = ctx.reportAtTop;
-  useEffect(() => reportAtTop(win.stickToTop), [reportAtTop, win.stickToTop]);
+  useEffect(
+    () => reportAtTop("strip", win.stickToTop),
+    [reportAtTop, win.stickToTop],
+  );
 
   const rows = useMemo(() => {
     const out: number[] = [];

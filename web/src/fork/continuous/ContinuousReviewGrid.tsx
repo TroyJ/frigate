@@ -126,17 +126,21 @@ export function ContinuousReviewGrid({
   const [rowHeight, setRowHeight] = useState(CARD_ESTIMATE);
   const probeRef = useRef<HTMLDivElement | null>(null);
   useLayoutEffect(() => {
-    const node = probeRef.current;
-    if (!node) return;
+    const container = contentRef.current;
+    if (!container) return;
+    // Observe the CONTAINER, not the probe row. `probeRef` is attached to whichever row is
+    // currently first, so it moves as you scroll and an observer bound to it ends up
+    // watching a detached node and never fires again. Row height only changes when the
+    // container's width changes anyway, which is exactly what this sees.
     const measure = () => {
-      const h = node.getBoundingClientRect().height;
+      const h = probeRef.current?.getBoundingClientRect().height ?? 0;
       if (h > 0) setRowHeight((prev) => (Math.abs(prev - h) < 1 ? prev : h));
     };
     measure();
     const ro = new ResizeObserver(measure);
-    ro.observe(node);
+    ro.observe(container);
     return () => ro.disconnect();
-  }, [columns, items.length]);
+  }, [contentRef, columns, items.length]);
 
   /**
    * Virtualize by ROW, not by card, and do not use the virtualizer's `lanes`.
@@ -208,7 +212,7 @@ export function ContinuousReviewGrid({
   useEffect(() => {
     const el = contentRef.current;
     if (!el) return;
-    const onScroll = () => reportAtTop(el.scrollTop < 24);
+    const onScroll = () => reportAtTop("grid", el.scrollTop < 24);
     onScroll();
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);

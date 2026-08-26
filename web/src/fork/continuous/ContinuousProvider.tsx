@@ -39,6 +39,7 @@ import { useFrigateReviews } from "@/api/ws";
 import { useContinuousEnabled } from "./useContinuousEnabled";
 import { FetchQueue, isAbort } from "./fetchQueue";
 import { ReviewPage, mergeReviews, groupByCamera } from "./store";
+import { matchesFilter } from "./filterMatch";
 import { usePlaybackChunks } from "./usePlaybackChunks";
 import {
   DAY,
@@ -94,7 +95,7 @@ export type ContinuousContextValue = {
   /** Tell the provider where the player is, so the chunk window can follow it (§9.5). */
   reportPlayhead: (t: number) => void;
   /** Tell the provider whether the active surface is pinned to the newest edge (§9.3). */
-  reportAtTop: (atTop: boolean) => void;
+  reportAtTop: (surface: SurfaceName, atTop: boolean) => void;
   /** Jump the active surface to the newest edge. */
   scrollToTop: () => void;
   registerSurface: (name: SurfaceName, api: SurfaceApi) => () => void;
@@ -212,6 +213,7 @@ export function ContinuousProvider({ filter, children }: Props) {
     heavyQueue.cancelAll();
     setPages(new Map());
     setOverrides(new Map());
+    setPatches(new Map());
     setOldest(floorHourInTz(Math.floor(Date.now() / 1000) - INITIAL_SPAN, tz));
   }, [filterKey, reviewQueue, heavyQueue, tz]);
 
@@ -341,13 +343,26 @@ export function ContinuousProvider({ filter, children }: Props) {
   const pagesRef = useRef(pages);
   pagesRef.current = pages;
 
-  // §9.3: the chip only means anything while the user is NOT at the newest edge. The
-  // active surface reports its stickiness; sitting at the top clears the counter, which is
-  // what makes "N new" mean "arrived while you were reading history".
-  const [atTop, setAtTop] = useState(true);
-  const reportAtTop = useCallback((v: boolean) => {
-    setAtTop((prev) => (prev === v ? prev : v));
+  // §9.3: the chip only means anything while the user is NOT at the newest edge.
+  //
+  // PER SURFACE, not one boolean. Three surfaces report — the grid, the review strip and
+  // the motion strip — and with a single last-writer-wins flag the strip sitting at the top
+  // cleared the counter while the GRID was deep in history, so arrivals went unannounced
+  // and a redelivered `new` could be counted twice. An item is announced unless the surface
+  // that would show it is already at the newest edge.
+  const [atTopBySurface, setAtTopBySurface] = useState<
+    Partial<Record<SurfaceName, boolean>>
+  >({});
+  const reportAtTop = useCallback((surface: SurfaceName, v: boolean) => {
+    setAtTopBySurface((prev) =>
+      prev[surface] === v ? prev : { ...prev, [surface]: v },
+    );
   }, []);
+  /** True when every mounted surface is pinned to now — nothing to announce anywhere. */
+  const allAtTop = useMemo(() => {
+    const values = Object.values(atTopBySurface);
+    return values.length > 0 && values.every(Boolean);
+  }, [atTopBySurface]);
 
   // ---- WebSocket merge (§9.4, Phase 7) ---------------------------------------------
   // `useFrigateReviews` carries all four types and the WS item ALWAYS wins over page data:
@@ -369,6 +384,11 @@ export function ContinuousProvider({ filter, children }: Props) {
     // A deleted review can still receive an `end`/`genai` message in flight. Re-inserting
     // it would resurrect a card the user just removed, so the tombstone wins.
     if (removed.has(item.id)) return;
+    // The socket is a firehose of EVERY review on the box; the pages are filtered
+    // server-side and this is not. Without the check, a filtered view rendered items it had
+    // excluded, counted them in the chip, and could never drop them again — no refetch
+    // returns an item the server filtered out, and an override beats page data (§14.4).
+    if (!matchesFilter(item, filter)) return;
     setOverrides((prev) => {
       const existing = prev.get(item.id);
       if (existing && existing === item) return prev;
@@ -382,28 +402,39 @@ export function ContinuousProvider({ filter, children }: Props) {
       seenNew.current.add(item.id);
       setPendingNew((n) => n + 1);
     }
-  }, [wsReview, oldest, removed]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsReview, oldest, removed, filterKey]);
 
-  // Sitting at the newest edge means there is nothing "new" to announce (§9.3).
+  // Everything on screen is pinned to now — there is nothing to announce (§9.3).
   useEffect(() => {
-    if (!atTop) return;
+    if (!allAtTop) return;
     seenNew.current.clear();
     setPendingNew((n) => (n === 0 ? n : 0));
-  }, [atTop, pendingNew]);
+  }, [allAtTop, pendingNew]);
 
+  /**
+   * A local change the server has not echoed back yet — today only `has_been_reviewed`.
+   *
+   * It is kept in its OWN layer rather than folded into `overrides`, because a WS
+   * `update`/`end`/`genai` replaces the whole segment and does not carry
+   * `has_been_reviewed`: folding it in meant the next message for that id silently
+   * un-reviewed a card the user had just marked, and it reappeared in the grid.
+   * `mergeReviews` applies patches last, so the local truth survives until a page refetch
+   * agrees with it.
+   */
+  const [patches, setPatches] = useState<Map<string, Partial<ReviewSegment>>>(
+    () => new Map(),
+  );
   const patchReviews = useCallback(
     (ids: string[], patch: Partial<ReviewSegment>) => {
-      setOverrides((prev) => {
+      setPatches((prev) => {
         const next = new Map(prev);
-        const current = mergeReviews(pagesRef.current.values(), prev, removed);
-        for (const id of ids) {
-          const r = current.find((x) => x.id === id);
-          if (r) next.set(id, { ...r, ...patch });
-        }
+        for (const id of ids)
+          next.set(id, { ...(next.get(id) ?? {}), ...patch });
         return next;
       });
     },
-    [removed],
+    [],
   );
 
   const removeReviews = useCallback((ids: string[]) => {
@@ -418,11 +449,17 @@ export function ContinuousProvider({ filter, children }: Props) {
       for (const id of ids) next.delete(id);
       return next;
     });
+    setPatches((prev) => {
+      if (!ids.some((id) => prev.has(id))) return prev;
+      const next = new Map(prev);
+      for (const id of ids) next.delete(id);
+      return next;
+    });
   }, []);
 
   const reviews = useMemo(
-    () => mergeReviews(pages.values(), overrides, removed),
-    [pages, overrides, removed],
+    () => mergeReviews(pages.values(), overrides, removed, patches),
+    [pages, overrides, removed, patches],
   );
   const reviewsByCamera = useMemo(() => groupByCamera(reviews), [reviews]);
 

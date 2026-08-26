@@ -198,7 +198,10 @@ export function ContinuousMotionStrip({
   );
 
   const reportAtTop = ctx.reportAtTop;
-  useEffect(() => reportAtTop(win.stickToTop), [reportAtTop, win.stickToTop]);
+  useEffect(
+    () => reportAtTop(surface, win.stickToTop),
+    [reportAtTop, surface, win.stickToTop],
+  );
 
   // The Review page's motion tab owns its own playhead; tell the provider so the playback
   // chunk window follows it (§9.5). On History the panel reports instead.

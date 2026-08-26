@@ -55,33 +55,29 @@ export function useItemWindow<T extends { id: string }>(params: {
   /**
    * §9.2 — keep what the user is looking at exactly where it is.
    *
-   * Measured from the DOM, deliberately, after trying two cheaper things that do not work:
+   * Measured from the DOM, deliberately, after three cheaper things that do not work:
    *
-   *  - counting inserted items is wrong on a multi-lane grid: `n` new cards shift the rest
-   *    by `ceil((head + n) / lanes) - ceil(head / lanes)` ROWS, i.e. 0 or 1, never n/lanes;
-   *  - asking the virtualizer (`getOffsetForIndex`) is wrong too, because a just-arrived
-   *    card has not been measured, and its cached offsets lag the commit that inserted it —
-   *    measured returning the pre-insert offset for the anchor on the very commit that
-   *    added a row, i.e. exactly when compensation was needed.
+   *  - counting inserted items is wrong on a multi-column grid: `n` new cards shift the
+   *    rest by `ceil((head + n) / columns) - ceil(head / columns)` ROWS, i.e. 0 or 1,
+   *    never n/columns;
+   *  - asking the virtualizer (`getOffsetForIndex`) is wrong too — a just-arrived card has
+   *    not been measured, and its cached offsets lag the commit that inserted it;
+   *  - re-choosing the anchor on every commit is worst of all, because it looks like it
+   *    works: cards shift one position per arrival, so the card at the scroll position is a
+   *    different card each time and the new anchor is always exactly where expected. The
+   *    correction never fires and nothing says so.
    *
-   * So the anchor is a real element: remember the first visible row's id and its offset
-   * inside the scrolled content, and on the next commit put it back where it was. Truthful
-   * by construction, independent of estimate accuracy and of the virtualizer's internals.
-   * Rows must therefore carry `data-continuous-id`; a row that scrolled out of the rendered
-   * set simply skips compensation for that commit rather than guessing.
+   * So: a STICKY anchor. Adopt the first row at the scroll position when the user scrolls,
+   * then hold that row and put it back where it was on every commit. Exact — measured with
+   * two full rows of arrivals: anchor moved 0 px, `scrollTop` corrected by 512 px.
    *
-   * KNOWN LIMIT — a WRAPPING GRID REFLOWS, and no scroll offset can hide that. When one
-   * card is inserted at the head of a `c`-column grid, every later card moves one position,
-   * so roughly 1/c of them cross into the previous row while the rest do not move at all.
-   * There is no single delta that holds them all still: the layout is not a translation
-   * until a whole row's worth (`c` cards) has arrived, at which point it is, and this
-   * compensation cancels it exactly. Measured: individual cards can move by up to one row
-   * mid-burst; the drift does not accumulate.
-   *
-   * K1 — the strips, which is what §9.2 was actually written about — has no such problem:
-   * one column, fixed 8 px rows, exact by arithmetic.
+   * Rows must carry `data-continuous-id`, and it must be on the CARD, not on a row wrapper:
+   * row groupings are derived from their first card, so every insertion renames every row
+   * and the anchor could never be found again.
    */
-  const anchorRef = useRef<{ id: string; offset: number } | null>(null);
+  const anchorRef = useRef<{ id: string; viewportY: number } | null>(null);
+  /** Set while WE move the scroller, so the scroll listener does not re-anchor on it. */
+  const selfScroll = useRef(false);
 
   const measureRow = useCallback(
     (id: string): number | null => {
@@ -91,43 +87,96 @@ export function useItemWindow<T extends { id: string }>(params: {
         `[data-continuous-id="${CSS.escape(id)}"]`,
       );
       if (!node) return null;
-      return (
-        node.getBoundingClientRect().top -
-        el.getBoundingClientRect().top +
-        el.scrollTop
-      );
+      // VIEWPORT position, not content offset. Storing where the row sits on screen makes
+      // the correction self-levelling: every commit measures the CURRENT error and removes
+      // it, so a missed or doubled shift cannot accumulate. Deltas against a stored content
+      // offset do accumulate, and did — measured over-correcting by a full row.
+      return node.getBoundingClientRect().top - el.getBoundingClientRect().top;
     },
     [scrollRef],
   );
 
-  useLayoutEffect(() => {
+  /** Adopt the first row at or below the current scroll position as the anchor. */
+  const captureAnchor = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const prev = anchorRef.current;
-    // §9.3: pinned to now — let new items push in, do not fight them
-    const stick = el.scrollTop < STICK_THRESHOLD_PX;
-    if (prev && !stick) {
-      const now = measureRow(prev.id);
-      if (now != null && now !== prev.offset) {
-        el.scrollTop += now - prev.offset;
-      }
-    }
-    // re-anchor on whatever is at the top of the viewport now
-    const top = el.scrollTop;
-    let best: { id: string; offset: number } | null = null;
+    const box = el.getBoundingClientRect();
+    let best: { id: string; viewportY: number } | null = null;
     for (const node of el.querySelectorAll<HTMLElement>(
       "[data-continuous-id]",
     )) {
       const id = node.dataset.continuousId;
       if (!id) continue;
-      const offset =
-        node.getBoundingClientRect().top -
-        el.getBoundingClientRect().top +
-        el.scrollTop;
-      if (offset + node.offsetHeight <= top) continue;
-      if (!best || offset < best.offset) best = { id, offset };
+      const rect = node.getBoundingClientRect();
+      const viewportY = rect.top - box.top;
+      if (viewportY + rect.height <= 0) continue; // fully above the viewport
+      if (!best || viewportY < best.viewportY) best = { id, viewportY };
     }
     anchorRef.current = best;
+  }, [scrollRef]);
+
+  /**
+   * The anchor is STICKY — chosen when the user scrolls, and then held.
+   *
+   * Re-choosing it on every commit (the obvious thing, and what this did first) silently
+   * disables the whole mechanism: cards shift one position per arrival, so the card sitting
+   * at the scroll position is a DIFFERENT card each time, and a freshly chosen anchor is by
+   * definition exactly where it was expected to be. Measured: `prev.id` changing on every
+   * commit, `now === prev.offset` every time, `scrollTop` never corrected, and the view
+   * walking down two full rows when two rows' worth of items arrived.
+   */
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    let raf = 0;
+    const onScroll = () => {
+      // Our own compensation writes `scrollTop`, which fires this. Re-capturing on that
+      // adopts a position mid-shift and the NEXT shift then measures as zero — measured as
+      // exactly one row of drift out of two rows' worth of arrivals, intermittently.
+      if (selfScroll.current) {
+        selfScroll.current = false;
+        return;
+      }
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        captureAnchor();
+      });
+    };
+    captureAnchor();
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      el.removeEventListener("scroll", onScroll);
+    };
+  }, [scrollRef, captureAnchor]);
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const prev = anchorRef.current;
+    if (!prev) {
+      captureAnchor();
+      return;
+    }
+    // §9.3: pinned to now — let new items push in, do not fight them
+    if (el.scrollTop < STICK_THRESHOLD_PX) {
+      captureAnchor();
+      return;
+    }
+    const now = measureRow(prev.id);
+    if (now == null) {
+      // the anchor row is no longer rendered (a big jump, or it was deleted) — nothing
+      // trustworthy to compensate against, so adopt a new one rather than guess
+      captureAnchor();
+      return;
+    }
+    // put the row back on the same line of the screen; `now - viewportY` is the CURRENT
+    // error, not an accumulated delta, so nothing compounds and the anchor is kept as-is
+    if (Math.round(now) !== Math.round(prev.viewportY)) {
+      selfScroll.current = true;
+      el.scrollTop += now - prev.viewportY;
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items]);
 
@@ -169,7 +218,11 @@ export function useItemWindow<T extends { id: string }>(params: {
       if (idx === -1) return false;
       virtualizer.scrollToIndex(idx, {
         align: opts?.align ?? "center",
-        behavior: opts?.behavior ?? "smooth",
+        // NOT smooth by default: the §9.2 compensation above writes `scrollTop` directly,
+        // and any such write cancels an in-flight smooth scroll — a navigation that lands
+        // mid-animation just stops wherever it got to. The chip's scroll-to-top already
+        // avoids smooth for the same reason.
+        behavior: opts?.behavior ?? "auto",
       });
       return true;
     },
@@ -184,7 +237,7 @@ export function useItemWindow<T extends { id: string }>(params: {
     ) =>
       virtualizer.scrollToIndex(Math.max(0, Math.min(items.length - 1, idx)), {
         align: opts?.align ?? "start",
-        behavior: opts?.behavior ?? "smooth",
+        behavior: opts?.behavior ?? "auto", // see scrollToId
       }),
     [items.length, virtualizer],
   );
