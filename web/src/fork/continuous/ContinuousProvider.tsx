@@ -274,8 +274,13 @@ export function ContinuousProvider({ filter, children }: Props) {
     () => [...pages.values()].some((p) => p.status === "loading"),
     [pages],
   );
+  // One page at a time (F12): while a review page is still loading, a further
+  // loadOlder() is a no-op — K1/K2 will ask again on the next scroll/update tick.
+  const loadingRef = useRef(false);
+  loadingRef.current = isLoadingOlder;
 
   const loadOlder = useCallback(() => {
+    if (loadingRef.current) return;
     setOldest((prev) => {
       if (prev <= floor) return prev;
       return Math.max(
