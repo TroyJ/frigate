@@ -238,13 +238,22 @@ export default function DynamicVideoPlayer({
       );
     }
 
-    setSource({
-      playlist: `${apiHost}vod/${camera}/start/${recordingParams.after}/end/${recordingParams.before}/master.m3u8`,
-      startPosition,
-    });
+    // fork — DELIBERATE DEVIATION: `startTimestamp` joins the dependencies below.
+    // Upstream recomputes the source only when `recordings` changes, so a chunk change that
+    // resolved to an already-cached `recordings` array left `startPosition` at its previous
+    // value and the player opened the new hour at the wrong offset. Measured on a deep
+    // seek: the blip sits 38.8 s into the hour's concatenated stream and playback started
+    // at ~0. `setSource` is made idempotent at the same time so adding the dependency
+    // cannot churn the HLS instance when nothing actually changed.
+    const playlist = `${apiHost}vod/${camera}/start/${recordingParams.after}/end/${recordingParams.before}/master.m3u8`;
+    setSource((prev) =>
+      prev && prev.playlist === playlist && prev.startPosition === startPosition
+        ? prev
+        : { playlist, startPosition },
+    );
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recordings]);
+  }, [recordings, startTimestamp]);
 
   useEffect(() => {
     if (!controller || !recordings?.length) {
@@ -255,7 +264,16 @@ export default function DynamicVideoPlayer({
       playerRef.current.autoplay = !isScrubbing;
     }
 
-    setLoadingTimeout(setTimeout(() => setIsLoading(true), 1000));
+    // fork (D21): same guard as the mount timer above, and for the same reason. This one
+    // arms when the hour HAS recordings, so it also fires for a gap INSIDE the hour —
+    // `calculateSeekPosition` returns undefined there and the controller calls
+    // `setNoRecording(true)` — and without the guard it latched `isLoading` back on and
+    // re-suppressed the explanation.
+    setLoadingTimeout(
+      setTimeout(() => {
+        if (!noRecordingRef.current) setIsLoading(true);
+      }, 1000),
+    );
 
     controller.newPlayback({
       recordings: recordings ?? [],

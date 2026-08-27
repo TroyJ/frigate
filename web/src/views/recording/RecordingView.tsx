@@ -28,6 +28,7 @@ import { getChunkedTimeDay } from "@/utils/timelineUtil";
 import {
   ContinuousTimelinePanel,
   describeMissingFootage,
+  sameHour,
   useContinuous,
 } from "@/fork/continuous";
 import {
@@ -83,6 +84,14 @@ import {
 } from "@/components/overlay/chip/GenAISummaryChip";
 
 const DATA_REFRESH_TIME = 600000; // 10 minutes
+/**
+ * fork (Phase 6): how long a deep seek may own `currentTime` before the player's clock
+ * takes it back. Generous — the slowest deep seek measured here took 6.6 s from click to
+ * the target hour's playlist, under a 20x CPU throttle against the dev proxy — but finite,
+ * so a seek that can never land (a gap with no footage in the target hour) cannot freeze
+ * the handlebar. It has NOT been measured through HA ingress + Cloudflare (L3).
+ */
+const FORK_SEEK_LANDING_MS = 15_000;
 
 type RecordingViewProps = {
   startCamera: string;
@@ -174,17 +183,42 @@ export function RecordingView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [timeRange, continuous.enabled, continuous.enabled && continuous.chunks],
   );
-  const [selectedRangeIdx, setSelectedRangeIdx] = useState(
-    chunkedTimeRange.findIndex((chunk) => {
-      return chunk.after <= startTime && chunk.before >= startTime;
-    }),
-  );
+  // fork (Phase 6): `findIndex` returns -1 when `startTime` is outside the chunk list, and
+  // under the sliding ±6 h window that is the NORMAL case — opening History on anything
+  // older than six hours. -1 then means `currentTimeRange` silently falls back to the last
+  // chunk (the wrong hour: fetched, HLS-loaded, played), the re-anchor remap reads
+  // `prevList[-1]` and bails, and `onClipEnded` walks to index 0. Clamp to the nearest
+  // chunk instead; the Q3 effect below re-resolves it exactly once the window re-anchors.
+  const [selectedRangeIdx, setSelectedRangeIdx] = useState(() => {
+    const exact = chunkedTimeRange.findIndex(
+      (chunk) => chunk.after <= startTime && chunk.before >= startTime,
+    );
+    if (exact !== -1) return exact;
+    if (chunkedTimeRange.length === 0) return 0;
+    let nearest = 0;
+    let best = Infinity;
+    chunkedTimeRange.forEach((chunk, i) => {
+      const d = Math.min(
+        Math.abs(chunk.after - startTime),
+        Math.abs(chunk.before - startTime),
+      );
+      if (d < best) {
+        best = d;
+        nearest = i;
+      }
+    });
+    return nearest;
+  });
   const currentTimeRange = useMemo<TimeRange>(
     () =>
       chunkedTimeRange[selectedRangeIdx] ??
       chunkedTimeRange[chunkedTimeRange.length - 1],
     [selectedRangeIdx, chunkedTimeRange],
   );
+  // read by `seekIntent`, which must stay identity-stable: it is handed to the panel and
+  // from there to every segment cell, and a new identity per chunk change re-renders them
+  const currentTimeRangeRef = useRef(currentTimeRange);
+  currentTimeRangeRef.current = currentTimeRange;
 
   // fork (Phase 6 / §9.5): the continuous chunk list SLIDES, and `selectedRangeIdx` is a
   // positional index into it. When the window re-anchors, the same index means a different
@@ -200,7 +234,7 @@ export function RecordingView({
     const prevList = prevChunksRef.current;
     if (prevList === chunkedTimeRange) return;
     prevChunksRef.current = chunkedTimeRange;
-    const prev = prevList[selectedRangeIdx];
+    const prev = prevList[selectedRangeIdx] ?? prevList[prevList.length - 1];
     if (!prev) return;
     const idx = chunkedTimeRange.findIndex(
       (c) => c.after <= prev.after && c.before > prev.after,
@@ -298,6 +332,64 @@ export function RecordingView({
   const [currentTime, setCurrentTime] = useState<number>(startTime);
   const [playerTime, setPlayerTime] = useState(startTime);
 
+  // fork (Phase 6): the outstanding deep-seek target. Declared up here because TWO writers
+  // share `currentTime` — the user's intent and the player's clock — and the intent has to
+  // be recorded at the moment of the gesture, before either can be overwritten. See the
+  // effect that consumes it below for the full reasoning.
+  const forkSeekTarget = useRef<number>();
+  /**
+   * The same target, held until the seek has actually LANDED — a different moment from
+   * `forkSeekTarget` being consumed.
+   *
+   * `forkSeekTarget` is cleared as soon as the chunk INDEX resolves, but the player has not
+   * switched source yet: the new `timeRange` still has to reach `DynamicVideoPlayer` and a
+   * new HLS playlist has to load. The old chunk emits `timeupdate` throughout that gap, and
+   * one of those writing into `currentTime` sends the provider's window straight back where
+   * it came from — measured under a 12x CPU throttle: playhead on the target at 704 ms, the
+   * target hour's VOD at 3034 ms, and in the same millisecond the playhead reverts to the
+   * old chunk's clock and the old hour loads again.
+   *
+   * "Landed" is a reported timestamp inside the target's HOUR: that is the granularity the
+   * chunk window works in, and a seek legitimately arrives some seconds off the exact
+   * moment when the hour has gaps (`calculateSeekPosition` moves it to real footage).
+   *
+   * Time-boxed, because "landed" is defined by something the player has to DO. Seek into a
+   * gap deep in the retained range and the hour may produce no timestamp in that hour at
+   * all — `setNoRecording` instead — and without the deadline `currentTime` would stay
+   * suppressed until the next gesture. After FORK_SEEK_LANDING_MS the player's clock gets
+   * its state back; the seek either worked or it did not, and pretending otherwise costs a
+   * frozen handlebar.
+   */
+  const forkSeekLanding = useRef<{ target: number; at: number }>();
+
+  /**
+   * fork (Phase 6): the setter the continuous panel gets for handlebar moves.
+   *
+   * A strip segment click reaches `setHandlebarTime`, which IS `setCurrentTime` — the very
+   * same state the playing chunk writes to four times a second from `onTimestampUpdate`.
+   * Two writers, one variable, last writer in the batch wins: MEASURED, a `timeupdate`
+   * landed between the click and the effect that latches the target, so the latch captured
+   * the PLAYER's position (1787709872) instead of the clicked moment (1787451420) and then
+   * "resolved" a seek to where playback already was. The provider had already re-anchored
+   * its chunk window on the clicked hour and fetched its recordings — the trace shows that
+   * request — and then the next report dragged the anchor back to now and the deep hour was
+   * abandoned. Whether it happened depended on where a 250 ms timer fell, which is why it
+   * failed under suite load and passed standalone.
+   *
+   * So: record the intent synchronously here, and let `onTimestampUpdate` know it must not
+   * overwrite it. An updater function carries no inspectable time, so it is passed through.
+   */
+  const seekIntent = useCallback((value: React.SetStateAction<number>) => {
+    if (typeof value === "number") {
+      const range = currentTimeRangeRef.current;
+      if (!range || range.after > value || range.before < value) {
+        forkSeekTarget.current = value;
+        forkSeekLanding.current = { target: value, at: Date.now() };
+      }
+    }
+    setCurrentTime(value);
+  }, []);
+
   const updateSelectedSegment = useCallback(
     (currentTime: number, updateStartTime: boolean) => {
       const index = chunkedTimeRange.findIndex(
@@ -346,6 +438,11 @@ export function RecordingView({
       if (!currentTimeRange) {
         return;
       }
+      if (currentTimeRange.after > time || currentTimeRange.before < time) {
+        // fork: latch the intent HERE, synchronously with the gesture — see `forkSeekTarget`
+        forkSeekTarget.current = time;
+        forkSeekLanding.current = { target: time, at: Date.now() };
+      }
       setCurrentTime(time);
 
       if (currentTimeRange.after <= time && currentTimeRange.before >= time) {
@@ -364,24 +461,34 @@ export function RecordingView({
   // any jump further than the window is wide — clicking a three-day-old blip, for one.
   // The panel reports the playhead to the provider, the provider re-anchors the window
   // around it, and this resolves the index once the new list arrives: auto-load, then apply
-  // the seek. Without it, deep seeks do nothing at all.
+  // the seek.
+  //
+  // The target is LATCHED in a ref rather than re-read from `currentTime` when the window
+  // finally arrives, and that is not defensive coding — it is the bug. The old chunk's
+  // player keeps calling `onTimestampUpdate` while all this happens, which writes its own
+  // position back into `currentTime`, so by the time the window had re-anchored the "target"
+  // had reverted to roughly now. Measured: `startTimestamp` arriving at the deep hour as
+  // 1787722819 (now) instead of 1787451420, `calculateSeekPosition` returning undefined for
+  // being out of range, and playback starting at 0:00 of the wrong-by-38-seconds hour.
   useEffect(() => {
     if (!continuous.enabled || !currentTime) return;
-    if (
-      currentTimeRange &&
-      currentTimeRange.after <= currentTime &&
-      currentTimeRange.before >= currentTime
-    ) {
-      return;
+    const inRange = (t: number) =>
+      !!currentTimeRange &&
+      currentTimeRange.after <= t &&
+      currentTimeRange.before >= t;
+    if (forkSeekTarget.current === undefined) {
+      if (inRange(currentTime)) return;
+      forkSeekTarget.current = currentTime;
     }
+    const target = forkSeekTarget.current;
     const idx = chunkedTimeRange.findIndex(
-      (c) => c.after <= currentTime && c.before > currentTime,
+      (c) => c.after <= target && c.before > target,
     );
-    if (idx !== -1) {
-      setPlaybackStart(currentTime);
-      setSelectedRangeIdx(idx);
-      forkPendingSeek.current = currentTime;
-    }
+    if (idx === -1) return; // the window has not re-anchored around it yet
+    forkSeekTarget.current = undefined;
+    setPlaybackStart(target);
+    setSelectedRangeIdx(idx);
+    forkPendingSeek.current = target;
   }, [chunkedTimeRange, currentTime, currentTimeRange, continuous.enabled]);
 
   // …and then actually PLAY it. Upstream seeks-and-plays in the effect keyed on
@@ -861,6 +968,24 @@ export function RecordingView({
                   fullscreen={fullscreen}
                   onTimestampUpdate={(timestamp) => {
                     setPlayerTime(timestamp);
+                    // fork: an outstanding deep seek OWNS `currentTime` until it LANDS.
+                    // The outgoing chunk keeps playing while the window re-anchors and the
+                    // new playlist loads, and its position writing over the target is what
+                    // abandoned the seek (see `seekIntent` / `forkSeekLanding`).
+                    // `playerTime` above is untouched, so everything that legitimately
+                    // tracks the video still does; the preview scrub below is skipped for
+                    // the same reason as `currentTime` — during those few hundred ms the
+                    // previews would be chasing the hour the user just left.
+                    const landing = continuous.enabled
+                      ? forkSeekLanding.current
+                      : undefined;
+                    if (landing !== undefined) {
+                      const landed = sameHour(timestamp, landing.target);
+                      const expired =
+                        Date.now() - landing.at > FORK_SEEK_LANDING_MS;
+                      if (!landed && !expired) return;
+                      forkSeekLanding.current = undefined;
+                    }
                     setCurrentTime(timestamp);
                     Object.values(previewRefs.current ?? {}).forEach((prev) =>
                       prev.scrubToTimestamp(Math.floor(timestamp)),
@@ -950,7 +1075,10 @@ export function RecordingView({
               activeReviewItem={activeReviewItem}
               currentTime={currentTime}
               exportRange={exportMode == "timeline" ? exportRange : undefined}
-              setCurrentTime={setCurrentTime}
+              // fork: `seekIntent`, not the plain setter — a segment click arrives here as
+              // `setHandlebarTime` and must not be indistinguishable from the playing
+              // chunk's own clock. Upstream's Timeline below keeps `setCurrentTime`.
+              setCurrentTime={seekIntent}
               manuallySetCurrentTime={manuallySetCurrentTime}
               setScrubbing={setScrubbing}
               setExportRange={setExportRange}

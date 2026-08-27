@@ -53,8 +53,9 @@ export class DynamicVideoController {
     );
 
     if (this.timeToStart) {
-      // fork (upstream bug): a seek deferred because its chunk was not loaded yet lost the
-      // caller's PLAY intent here — `seekToTimestamp` defaults `play` to false, so the
+      // fork — DELIBERATE DEVIATION from upstream (it also applies with the toggle OFF).
+      // A seek deferred because its chunk was not loaded yet lost the caller's PLAY intent
+      // here — `seekToTimestamp` defaults `play` to false, so the
       // deferred seek always landed paused. Unreachable while the chunk list covered the
       // whole retained range; with the sliding ±N h window (§9.5) it is the normal path for
       // any deep seek, which then buffered the right hour and sat at 0:00 paused.
@@ -107,10 +108,14 @@ export class DynamicVideoController {
         this.playerController.pause();
       }
     } else if (play) {
-      // fork: landing exactly at position 0 of a chunk is a legitimate outcome (a seek to
-      // the first frame of the hour). Upstream's "no op" left it paused, which reads as a
-      // broken player rather than as a deliberate stop.
-      this.waitAndPlay();
+      // fork — DELIBERATE DEVIATION from upstream, which has an explicit `// no op` here.
+      // Landing exactly at position 0 of a chunk is a legitimate outcome (a seek to the
+      // first frame of the hour) and leaving it paused reads as a broken player.
+      //
+      // `play()` directly, NOT `waitAndPlay()`: that helper waits for a `seeked` event, and
+      // this branch writes no `currentTime` at all, so nothing guarantees one is coming —
+      // the listener could sit there unfired and leave the player paused.
+      this.playerController.play();
     }
   }
 

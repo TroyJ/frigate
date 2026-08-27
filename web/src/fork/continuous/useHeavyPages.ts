@@ -95,8 +95,13 @@ export function useHeavyPages(params: {
     if (tailTick === undefined || tailTick === lastTick.current) return;
     lastTick.current = tailTick;
     const [live] = pagesFor(tailTick, tailTick + 1, HEAVY_PAGE_HOURS, tz);
-    if (live && pages.get(live.after)?.status === "done") {
-      pages.delete(live.after);
+    const page = live && pages.get(live.after);
+    if (page && page.status === "done" && !page.stale) {
+      // MARK, do not delete. `mergeHeavy` only emits `done` pages, so deleting the live
+      // page blanked the entire visible day — every motion bar and every gap — on every
+      // 30 s tick until the serialised queue refilled it. The stale copy keeps rendering
+      // and is swapped for the fresh one on success.
+      pages.set(live.after, { ...page, stale: true });
       rerender();
     }
   }, [tailTick, tz, pages, rerender]);
@@ -116,10 +121,12 @@ export function useHeavyPages(params: {
     for (const after of wantedRef.current) {
       if (!wantedSet.has(after)) {
         const p = pages.get(after);
-        if (p && p.status !== "done") {
-          queue.cancel(`${fam}:${after}`);
-          pages.delete(after);
-        }
+        if (!p) continue;
+        // cancel unconditionally: a SHADOW refresh leaves the page `done`, so keying the
+        // cancel on status alone left a scrolled-away refresh sitting in the serialised
+        // queue, holding the one slot the motion endpoint is allowed (F12).
+        queue.cancel(`${fam}:${after}`);
+        if (p.status !== "done") pages.delete(after);
       }
     }
     wantedRef.current = wantedSet;
@@ -131,16 +138,23 @@ export function useHeavyPages(params: {
         Math.abs(a.after + span / 2 - mid) - Math.abs(b.after + span / 2 - mid),
     );
     for (const p of ordered) {
-      if (pages.has(p.after)) continue;
+      const existing = pages.get(p.after);
+      if (existing && !existing.stale) continue;
       const before = Math.min(p.before, Math.floor(Date.now() / 1000));
       if (before <= p.after) continue;
-      pages.set(p.after, {
-        after: p.after,
-        before: p.before,
-        status: "loading",
-        motion: [],
-        unavailable: [],
-      });
+      if (existing) {
+        // shadow refresh: clear the flag so this does not re-enqueue every render, but
+        // leave the data in place so the strip keeps drawing while the fetch is in flight
+        pages.set(p.after, { ...existing, stale: false });
+      } else {
+        pages.set(p.after, {
+          after: p.after,
+          before: p.before,
+          status: "loading",
+          motion: [],
+          unavailable: [],
+        });
+      }
       queue
         .enqueue(
           `${fam}:${p.after}`,
@@ -185,6 +199,9 @@ export function useHeavyPages(params: {
         })
         .catch((e) => {
           if (isAbort(e)) return;
+          // a failed SHADOW refresh must not blank what is already on screen
+          const prior = pages.get(p.after);
+          if (prior && prior.status === "done") return;
           pages.set(p.after, {
             after: p.after,
             before: p.before,

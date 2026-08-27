@@ -10,3 +10,4 @@ export { ContinuousNewChip } from "./ContinuousNewChip";
 export { selectReviewItems } from "./selectReviews";
 export { describeMissingFootage } from "./footage";
 export { dayWindowFor } from "./dayNav";
+export { sameHour } from "./timeAlign";

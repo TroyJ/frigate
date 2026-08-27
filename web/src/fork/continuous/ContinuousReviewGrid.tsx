@@ -126,17 +126,21 @@ export function ContinuousReviewGrid({
   const [rowHeight, setRowHeight] = useState(CARD_ESTIMATE);
   const probeRef = useRef<HTMLDivElement | null>(null);
   useLayoutEffect(() => {
-    const node = probeRef.current;
-    if (!node) return;
+    const container = contentRef.current;
+    if (!container) return;
+    // Observe the CONTAINER, not the probe row. `probeRef` is attached to whichever row is
+    // currently first, so it moves as you scroll and an observer bound to it ends up
+    // watching a detached node and never fires again. Row height only changes when the
+    // container's width changes anyway, which is exactly what this sees.
     const measure = () => {
-      const h = node.getBoundingClientRect().height;
+      const h = probeRef.current?.getBoundingClientRect().height ?? 0;
       if (h > 0) setRowHeight((prev) => (Math.abs(prev - h) < 1 ? prev : h));
     };
     measure();
     const ro = new ResizeObserver(measure);
-    ro.observe(node);
+    ro.observe(container);
     return () => ro.disconnect();
-  }, [columns, items.length]);
+  }, [contentRef, columns, items.length]);
 
   /**
    * Virtualize by ROW, not by card, and do not use the virtualizer's `lanes`.
@@ -159,7 +163,10 @@ export function ContinuousReviewGrid({
     return out;
   }, [items, columns]);
 
-  const onNearEnd = useCallback(() => ctx.loadOlder(), [ctx]);
+  // `ctx.loadOlder`, not `ctx`: the context object is a new identity on every provider
+  // render, and this callback's identity is what re-arms the near-end effect.
+  const ctxLoadOlder = ctx.loadOlder;
+  const onNearEnd = useCallback(() => ctxLoadOlder(), [ctxLoadOlder]);
   const estimate = useCallback(() => rowHeight, [rowHeight]);
   const win = useItemWindow({
     scrollRef: contentRef as MutableRefObject<HTMLDivElement>,
@@ -167,6 +174,8 @@ export function ContinuousReviewGrid({
     estimateSize: estimate,
     gap: GAP,
     onNearEnd,
+    // a page can land with no items this grid shows — see `windowKey`
+    windowKey: ctx.pagesLoaded,
   });
 
   // --- S1 ⇄ S2 coupling: which items are actually on screen (see header) --------------
@@ -205,14 +214,20 @@ export function ContinuousReviewGrid({
   // §9.3: pinned to the newest edge? The chip is meaningless there and the provider clears
   // its counter. STICK_THRESHOLD is in useItemWindow; one card height is far too coarse.
   const reportAtTop = ctx.reportAtTop;
+  const forgetSurface = ctx.forgetSurface;
   useEffect(() => {
     const el = contentRef.current;
     if (!el) return;
-    const onScroll = () => reportAtTop(el.scrollTop < 24);
+    const onScroll = () => reportAtTop("grid", el.scrollTop < 24);
     onScroll();
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
   }, [contentRef, reportAtTop, items.length]);
+  // Retiring the surface is a MOUNT-scoped concern and gets its own effect: folded into
+  // the listener effect above it re-ran on every `items.length` change, and a forget +
+  // re-report is two provider state updates per page arrival — pure render churn on the
+  // one component that decides when to load more (see `useItemWindow`).
+  useEffect(() => () => forgetSurface("grid"), [forgetSurface]);
 
   // --- navigation registry (§2A.3 / D14) ---------------------------------------------
   useEffect(

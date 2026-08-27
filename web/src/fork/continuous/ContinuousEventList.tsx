@@ -35,13 +35,18 @@ export function ContinuousEventList({
     () => items.filter((r) => r.severity !== "significant_motion"),
     [items],
   );
-  const onNearEnd = useCallback(() => ctx.loadOlder(), [ctx]);
+  // `ctx.loadOlder`, not `ctx`: the context object is a new identity on every provider
+  // render, and this callback's identity is what re-arms the near-end effect.
+  const ctxLoadOlder = ctx.loadOlder;
+  const onNearEnd = useCallback(() => ctxLoadOlder(), [ctxLoadOlder]);
   const estimate = useCallback(() => CARD_ESTIMATE, []);
   const win = useItemWindow({
     scrollRef,
     items: list,
     estimateSize: estimate,
     onNearEnd,
+    // a page can land with no items this list shows — see `windowKey`
+    windowKey: ctx.pagesLoaded,
     lanes: isMobile ? 2 : 1,
   });
 

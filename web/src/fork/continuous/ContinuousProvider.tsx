@@ -38,7 +38,13 @@ import { useTimezone } from "@/hooks/use-date-utils";
 import { useFrigateReviews } from "@/api/ws";
 import { useContinuousEnabled } from "./useContinuousEnabled";
 import { FetchQueue, isAbort } from "./fetchQueue";
-import { ReviewPage, mergeReviews, groupByCamera } from "./store";
+import {
+  ReviewPage,
+  mergeReviews,
+  groupByCamera,
+  retirePatches,
+} from "./store";
+import { matchesFilter } from "./filterMatch";
 import { usePlaybackChunks } from "./usePlaybackChunks";
 import {
   DAY,
@@ -82,6 +88,8 @@ export type ContinuousContextValue = {
   hasMore: boolean;
   isLoadingOlder: boolean;
   loadOlder: () => void;
+  /** Count of review pages that have RESOLVED — see `useItemWindow`'s `windowKey`. */
+  pagesLoaded: number;
   ensureLoaded: (t: number) => Promise<void>;
   reviews: ReviewSegment[];
   reviewsByCamera: Map<string, ReviewSegment[]>;
@@ -93,8 +101,19 @@ export type ContinuousContextValue = {
   playhead?: number;
   /** Tell the provider where the player is, so the chunk window can follow it (§9.5). */
   reportPlayhead: (t: number) => void;
-  /** Tell the provider whether the active surface is pinned to the newest edge (§9.3). */
-  reportAtTop: (atTop: boolean) => void;
+  /**
+   * Tell the provider whether the active surface is pinned to the newest edge (§9.3).
+   * Call it as often as the answer changes; it is a no-op when the value is unchanged.
+   * RETIRING the surface is a separate call — `forgetSurface` — made only on unmount.
+   */
+  reportAtTop: (surface: SurfaceName, atTop: boolean) => void;
+  /**
+   * Drop a surface's entry entirely, for when it unmounts (§9.3).
+   *
+   * Not the same as reporting `true`: an unmounted surface has no opinion about the
+   * newest edge, and leaving a stale `false` behind latches `allAtTop` off forever.
+   */
+  forgetSurface: (surface: SurfaceName) => void;
   /** Jump the active surface to the newest edge. */
   scrollToTop: () => void;
   registerSurface: (name: SurfaceName, api: SurfaceApi) => () => void;
@@ -212,6 +231,12 @@ export function ContinuousProvider({ filter, children }: Props) {
     heavyQueue.cancelAll();
     setPages(new Map());
     setOverrides(new Map());
+    setPatches(new Map());
+    // The chip counts items for the OLD filter. Left standing it announces arrivals that
+    // the new filter may exclude, and `seenNew` would suppress a genuine re-announcement
+    // of the same id once it matches again.
+    seenNew.current.clear();
+    setPendingNew(0);
     setOldest(floorHourInTz(Math.floor(Date.now() / 1000) - INITIAL_SPAN, tz));
   }, [filterKey, reviewQueue, heavyQueue, tz]);
 
@@ -245,6 +270,10 @@ export function ContinuousProvider({ filter, children }: Props) {
             next.set(after, { after, before, status: "done", items });
             return next;
           });
+          // A patch is a local truth the server has not echoed yet, so it must be RETIRED
+          // once the server agrees — otherwise it masks that field for the rest of the
+          // session (see `retirePatches`).
+          setPatches((prev) => retirePatches(prev, items));
         })
         .catch((e) => {
           if (isAbort(e)) {
@@ -302,6 +331,20 @@ export function ContinuousProvider({ filter, children }: Props) {
     () => [...pages.values()].filter((p) => p.status === "loading").length,
     [pages],
   );
+  /**
+   * How many review pages have RESOLVED. Surfaces use it to re-arm their load-more check
+   * (`useItemWindow`'s `windowKey`), because a page can land carrying nothing they display.
+   *
+   * It counts ARRIVALS, deliberately, and not `oldest`: keying the re-arm on the window
+   * edge feeds `loadOlder`'s own output straight back into its trigger, and the window
+   * chains as fast as the in-flight cap allows. Measured when it was tried that way — eight
+   * pages requested at mount with nobody scrolling, `[24, 34.9, 106.9, 178.9, 250.9, 322.9,
+   * 394.9]` — which is the same runaway the pixel-distance rule was written to stop.
+   */
+  const pagesLoaded = useMemo(
+    () => [...pages.values()].filter((p) => p.status === "done").length,
+    [pages],
+  );
   const isLoadingOlder = loadingCount > 0;
   // Bounded lookahead, NOT a hard "any page loading" freeze (which let one slow/stuck
   // page halt the whole window — the ~31-day plateau). `/review` pages are cheap and the
@@ -341,13 +384,43 @@ export function ContinuousProvider({ filter, children }: Props) {
   const pagesRef = useRef(pages);
   pagesRef.current = pages;
 
-  // §9.3: the chip only means anything while the user is NOT at the newest edge. The
-  // active surface reports its stickiness; sitting at the top clears the counter, which is
-  // what makes "N new" mean "arrived while you were reading history".
-  const [atTop, setAtTop] = useState(true);
-  const reportAtTop = useCallback((v: boolean) => {
-    setAtTop((prev) => (prev === v ? prev : v));
+  // §9.3: the chip only means anything while the user is NOT at the newest edge.
+  //
+  // PER SURFACE, not one boolean. Three surfaces report — the grid, the review strip and
+  // the motion strip — and with a single last-writer-wins flag the strip sitting at the top
+  // cleared the counter while the GRID was deep in history, so arrivals went unannounced
+  // and a redelivered `new` could be counted twice. An item is announced unless the surface
+  // that would show it is already at the newest edge.
+  const [atTopBySurface, setAtTopBySurface] = useState<
+    Partial<Record<SurfaceName, boolean>>
+  >({});
+  // The entry must also be REMOVED when the surface unmounts, which is what `forgetSurface`
+  // is for. The Review tabs are mutually exclusive mounts under one provider, so an ordinary
+  // tab switch retires a surface: leaving its last `false` behind held `allAtTop` off for
+  // the rest of the session, and the chip then appeared on every arrival while the user sat
+  // pinned at now, with nothing able to clear it.
+  //
+  // It is deliberately NOT a disposer returned from `reportAtTop`: reporting happens on
+  // every scroll-state flip, retiring happens once, and tying them together made every flip
+  // a forget + re-report — two provider state updates for nothing.
+  const forgetSurface = useCallback((surface: SurfaceName) => {
+    setAtTopBySurface((prev) => {
+      if (!(surface in prev)) return prev;
+      const next = { ...prev };
+      delete next[surface];
+      return next;
+    });
   }, []);
+  const reportAtTop = useCallback((surface: SurfaceName, v: boolean) => {
+    setAtTopBySurface((prev) =>
+      prev[surface] === v ? prev : { ...prev, [surface]: v },
+    );
+  }, []);
+  /** True when every mounted surface is pinned to now — nothing to announce anywhere. */
+  const allAtTop = useMemo(() => {
+    const values = Object.values(atTopBySurface);
+    return values.length > 0 && values.every(Boolean);
+  }, [atTopBySurface]);
 
   // ---- WebSocket merge (§9.4, Phase 7) ---------------------------------------------
   // `useFrigateReviews` carries all four types and the WS item ALWAYS wins over page data:
@@ -369,6 +442,11 @@ export function ContinuousProvider({ filter, children }: Props) {
     // A deleted review can still receive an `end`/`genai` message in flight. Re-inserting
     // it would resurrect a card the user just removed, so the tombstone wins.
     if (removed.has(item.id)) return;
+    // The socket is a firehose of EVERY review on the box; the pages are filtered
+    // server-side and this is not. Without the check, a filtered view rendered items it had
+    // excluded, counted them in the chip, and could never drop them again — no refetch
+    // returns an item the server filtered out, and an override beats page data (§14.4).
+    if (!matchesFilter(item, filter)) return;
     setOverrides((prev) => {
       const existing = prev.get(item.id);
       if (existing && existing === item) return prev;
@@ -382,28 +460,40 @@ export function ContinuousProvider({ filter, children }: Props) {
       seenNew.current.add(item.id);
       setPendingNew((n) => n + 1);
     }
-  }, [wsReview, oldest, removed]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsReview, oldest, removed, filterKey]);
 
-  // Sitting at the newest edge means there is nothing "new" to announce (§9.3).
+  // Everything on screen is pinned to now — there is nothing to announce (§9.3).
   useEffect(() => {
-    if (!atTop) return;
+    if (!allAtTop) return;
     seenNew.current.clear();
     setPendingNew((n) => (n === 0 ? n : 0));
-  }, [atTop, pendingNew]);
+  }, [allAtTop, pendingNew]);
 
+  /**
+   * A local change the server has not echoed back yet — today only `has_been_reviewed`.
+   *
+   * It is kept in its OWN layer rather than folded into `overrides`, because a WS
+   * `update`/`end`/`genai` replaces the whole segment and does not carry
+   * `has_been_reviewed`: folding it in meant the next message for that id silently
+   * un-reviewed a card the user had just marked, and it reappeared in the grid.
+   * `mergeReviews` applies patches last, so the local truth survives until a page refetch
+   * agrees with it — at which point `fetchPage` retires the patch, so the server is the
+   * source of truth again and a change made elsewhere is not masked for the session.
+   */
+  const [patches, setPatches] = useState<Map<string, Partial<ReviewSegment>>>(
+    () => new Map(),
+  );
   const patchReviews = useCallback(
     (ids: string[], patch: Partial<ReviewSegment>) => {
-      setOverrides((prev) => {
+      setPatches((prev) => {
         const next = new Map(prev);
-        const current = mergeReviews(pagesRef.current.values(), prev, removed);
-        for (const id of ids) {
-          const r = current.find((x) => x.id === id);
-          if (r) next.set(id, { ...r, ...patch });
-        }
+        for (const id of ids)
+          next.set(id, { ...(next.get(id) ?? {}), ...patch });
         return next;
       });
     },
-    [removed],
+    [],
   );
 
   const removeReviews = useCallback((ids: string[]) => {
@@ -418,11 +508,17 @@ export function ContinuousProvider({ filter, children }: Props) {
       for (const id of ids) next.delete(id);
       return next;
     });
+    setPatches((prev) => {
+      if (!ids.some((id) => prev.has(id))) return prev;
+      const next = new Map(prev);
+      for (const id of ids) next.delete(id);
+      return next;
+    });
   }, []);
 
   const reviews = useMemo(
-    () => mergeReviews(pages.values(), overrides, removed),
-    [pages, overrides, removed],
+    () => mergeReviews(pages.values(), overrides, removed, patches),
+    [pages, overrides, removed, patches],
   );
   const reviewsByCamera = useMemo(() => groupByCamera(reviews), [reviews]);
 
@@ -498,6 +594,7 @@ export function ContinuousProvider({ filter, children }: Props) {
       hasMore,
       isLoadingOlder,
       loadOlder,
+      pagesLoaded,
       ensureLoaded,
       reviews,
       reviewsByCamera,
@@ -507,6 +604,7 @@ export function ContinuousProvider({ filter, children }: Props) {
       playhead,
       reportPlayhead,
       reportAtTop,
+      forgetSurface,
       scrollToTop,
       registerSurface,
       navigateToTime,
@@ -526,6 +624,7 @@ export function ContinuousProvider({ filter, children }: Props) {
       hasMore,
       isLoadingOlder,
       loadOlder,
+      pagesLoaded,
       ensureLoaded,
       reviews,
       reviewsByCamera,
@@ -535,6 +634,7 @@ export function ContinuousProvider({ filter, children }: Props) {
       playhead,
       reportPlayhead,
       reportAtTop,
+      forgetSurface,
       scrollToTop,
       registerSurface,
       navigateToTime,
