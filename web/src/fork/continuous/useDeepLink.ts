@@ -187,6 +187,13 @@ export function useContinuousDeepLink({
     const key = `${request.id ?? ""}|${request.t ?? ""}|${request.tab}|${request.view}`;
     if (handled.current === key) return;
     handled.current = key;
+    // The token every continuation below checks before it writes anything. Link 1's lookup
+    // can still be in flight when link 2 arrives (the user taps a second notification, or
+    // the app navigates), and without this its `.then` lands on link 2's state: a `nav` to
+    // the wrong moment, a `navigatedStart` that makes the wrong expiry check, a problem for
+    // an alert nobody asked about. Not solved by cancellation — StrictMode's immediate
+    // cleanup would cancel the ONLY lookup (see below).
+    const token = key;
 
     // A link is a fresh start. Without this, a SECOND link in the same session inherits the
     // first one's problem — which `preferResolveProblem` then refuses to replace with
@@ -256,6 +263,7 @@ export function useContinuousDeepLink({
     axios
       .get<ReviewSegment>(`review/${request.id}`)
       .then(async (resp) => {
+        if (handled.current !== token) return; // a newer link owns the page now
         // No `resp.status !== 200` branch: axios REJECTS a non-2xx, so it would be dead
         // code. An empty body is the only success-shaped failure left.
         const review = resp.data;
@@ -280,7 +288,12 @@ export function useContinuousDeepLink({
             tab: request.tab,
           });
         } else if (
-          latest.current.revealOnReviewPage?.(await withReviewedFlag(review))
+          // `withReviewedFlag` is a second round-trip, so re-check the token after it
+          await (async () => {
+            const full = await withReviewedFlag(review);
+            if (handled.current !== token) return false;
+            return latest.current.revealOnReviewPage?.(full) ?? false;
+          })()
         ) {
           // D19: we changed what the page shows in order to reach the target — say so.
           setResolveProblem((prev) =>
@@ -294,6 +307,7 @@ export function useContinuousDeepLink({
         });
       })
       .catch((err) => {
+        if (handled.current !== token) return; // a newer link owns the page now
         // D9: a stored link routinely points at something that is gone. 404 is the normal
         // case and gets the specific wording; anything else is "could not be loaded".
         setResolveProblem((prev) =>

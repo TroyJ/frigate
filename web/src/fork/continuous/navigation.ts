@@ -8,6 +8,7 @@
  * and treating a day-jump and a moment-jump as the same scroll on a dense strip.
  */
 import { startOfDayInTz } from "./timeAlign";
+import { PageStatus } from "./store";
 import { NavIntent } from "./ContinuousProvider";
 
 export type NavStep =
@@ -46,6 +47,31 @@ export function planNavigation(params: {
 }
 
 /**
+ * Is the window done doing everything it will do for `[from, to)` — planning included?
+ *
+ * `plannedOldest` is the oldest edge the provider's request effect has actually WORKED, and
+ * it is the half `pagesSettled` cannot see. `ensureLoaded` lowers `oldest` and then polls,
+ * but React has not committed yet on the first look: the new pages do not exist, so the
+ * coverage walk stops at the hole, the in-flight test finds nothing to wait for, and
+ * "settled" comes back true against a window that has not been extended at all. Not a race —
+ * it is the ordinary order of events, and the calendar day-jump (no `selectId`, so
+ * `planNavigation` says "go" at once) lands on whatever happened to be loaded.
+ *
+ * With the precondition the two indistinguishable cases separate cleanly: a hole that has
+ * been planned and abandoned (the abort path deletes the page) settles, and a hole that has
+ * not been planned yet does not.
+ */
+export function windowSettled(
+  plannedOldest: number,
+  from: number,
+  to: number,
+  pages: Iterable<PageRange>,
+): boolean {
+  if (plannedOldest > from) return false;
+  return pagesSettled(from, to, pages);
+}
+
+/**
  * Where a DENSE strip (S2/S3/S4) scrolls for a navigation — D14.
  *
  * A calendar day-jump lands on the day's oldest edge, 00:00 in the display timezone, which
@@ -66,7 +92,7 @@ export function denseStripTarget(
 export type PageRange = {
   after: number;
   before: number;
-  status: "queued" | "loading" | "done" | "error";
+  status: PageStatus;
 };
 
 /**
@@ -96,6 +122,10 @@ export function pagesSettled(
   to: number,
   pages: Iterable<PageRange>,
 ): boolean {
+  // NOTE what this deliberately does NOT decide: whether the span has been PLANNED yet. A
+  // hole that nobody has asked for looks exactly like a hole nobody is fetching any more,
+  // because both are "no page here, nothing in flight" — see `windowSettled`, which supplies
+  // the missing half.
   if (from >= to) return true;
   const all = [...pages];
   const finished = all

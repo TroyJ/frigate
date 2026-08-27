@@ -10,7 +10,12 @@
  *    near it" failure D11 exists to remove.
  */
 import { describe, expect, it } from "vitest";
-import { denseStripTarget, pagesSettled, planNavigation } from "../navigation";
+import {
+  denseStripTarget,
+  pagesSettled,
+  planNavigation,
+  windowSettled,
+} from "../navigation";
 import { startOfDayInTz } from "../timeAlign";
 
 const BOX = "Asia/Makassar";
@@ -116,10 +121,11 @@ describe("pagesSettled", () => {
     ).toBe(false);
   });
 
-  it("does not wait for a hole nothing is fetching — the ABORT path", () => {
-    // `fetchPage`'s abort branch DELETES the page, so its key simply vanishes. Keyed on
-    // identity that was indistinguishable from "not arrived yet" and burned the whole
-    // budget; as coverage, an unfetched hole with nothing in flight is finished business.
+  it("does not wait for a hole nothing is fetching", () => {
+    // Note what this does NOT distinguish: a hole that was requested and abandoned (the
+    // abort path deletes the page) from one nobody has asked for yet. Both are "no page,
+    // nothing in flight" here — `windowSettled` is what separates them, and the tests below
+    // are where that distinction is pinned.
     expect(pagesSettled(0, 3 * DAY, [done(2 * DAY, 4 * DAY)])).toBe(true);
   });
 
@@ -150,5 +156,45 @@ describe("pagesSettled", () => {
 
   it("an empty span is trivially settled", () => {
     expect(pagesSettled(5, 5, [])).toBe(true);
+  });
+});
+
+describe("windowSettled — the planning precondition (B1)", () => {
+  const H = 3600;
+  const DAY = 24 * H;
+  const NOW = 30 * DAY;
+  const done = (after: number, before: number) =>
+    ({ after, before, status: "done" }) as const;
+  const loading = (after: number, before: number) =>
+    ({ after, before, status: "loading" }) as const;
+
+  // The state a calendar jump to a day 20 days back starts from: a week or so is loaded.
+  const loaded = [done(23 * DAY, 26 * DAY), done(26 * DAY, NOW)];
+
+  it("is NOT settled before the request effect has planned the span", () => {
+    // THE bug. `ensureLoaded` lowers `oldest` and looks immediately; React has not committed,
+    // so the pages for the new span do not exist yet. Coverage stops at the hole, nothing is
+    // in flight over it, and the naive answer is "settled" — against a window that has not
+    // been extended at all. The calendar day-jump has no `selectId`, so `planNavigation`
+    // says "go" at once and the jump lands on whatever happened to be loaded.
+    expect(pagesSettled(10 * DAY, NOW, loaded)).toBe(true); // what the old code believed
+    expect(windowSettled(23 * DAY, 10 * DAY, NOW, loaded)).toBe(false);
+  });
+
+  it("is settled once planning has reached the target and the pages are done", () => {
+    const planned = [done(10 * DAY, 23 * DAY), ...loaded];
+    expect(windowSettled(10 * DAY, 10 * DAY, NOW, planned)).toBe(true);
+  });
+
+  it("still waits for pages that are planned and in flight", () => {
+    const inFlight = [loading(10 * DAY, 23 * DAY), ...loaded];
+    expect(windowSettled(10 * DAY, 10 * DAY, NOW, inFlight)).toBe(false);
+  });
+
+  it("does not wait for a hole that was planned and then ABANDONED", () => {
+    // `fetchPage`'s abort branch deletes the page. Planning HAS reached the target, so the
+    // hole is finished business rather than something still on its way — which is the
+    // distinction the pure coverage test cannot make on its own.
+    expect(windowSettled(10 * DAY, 10 * DAY, NOW, loaded)).toBe(true);
   });
 });

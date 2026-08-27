@@ -45,7 +45,7 @@ import {
   retirePatches,
 } from "./store";
 import { matchesFilter } from "./filterMatch";
-import { pagesSettled, planNavigation } from "./navigation";
+import { planNavigation, windowSettled } from "./navigation";
 import { usePlaybackChunks } from "./usePlaybackChunks";
 import {
   DAY,
@@ -342,6 +342,9 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
     reviewQueue.cancelAll();
     heavyQueue.cancelAll();
     setPages(new Map());
+    // planning starts over with the window (§14.4), or a navigation would believe the new,
+    // empty map had already been planned down to the old edge
+    plannedOldest.current = Math.floor(Date.now() / 1000);
     setOverrides(new Map());
     setPatches(new Map());
     // The chip counts items for the OLD filter. Left standing it announces arrivals that
@@ -409,6 +412,17 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
     [reviewQueue, filterKey, filter.cameras, filter.labels, filter.zones],
   );
 
+  /**
+   * The oldest edge this effect has actually PLANNED — every page down to it is in the map.
+   *
+   * `ensureLoaded` needs it and cannot infer it: lowering `oldest` does not create pages, so
+   * between "the window was widened" and "the pages exist" a hole looks identical to one
+   * that has been requested and abandoned. Assigned inside the updater rather than in the
+   * effect body, because the updater is the moment the pages enter the map — an assignment
+   * in the body is true one commit too early, which is precisely the window the bug lived in.
+   */
+  const plannedOldest = useRef(oldest);
+
   // keep every page between oldest and newest requested
   useEffect(() => {
     const wanted = pagesFor(oldest, newest, pageHours.current, tz);
@@ -428,6 +442,7 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
           pending.push(fetchPage(p.after, p.before));
         }
       }
+      plannedOldest.current = Math.min(plannedOldest.current, oldest);
       return next ?? prev;
     });
   }, [oldest, newest, tz, fetchPage]);
@@ -509,7 +524,12 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
       setOldest((prev) => Math.min(prev, target));
       while (Date.now() < deadline) {
         if (
-          pagesSettled(target, newestRef.current, pagesRef.current.values())
+          windowSettled(
+            plannedOldest.current,
+            target,
+            newestRef.current,
+            pagesRef.current.values(),
+          )
         ) {
           return;
         }
@@ -866,13 +886,16 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
       );
       return () => clearTimeout(timer);
     }
-    if (!named) {
-      lastBroadcast.current = {
-        t: req.t,
-        opts: req.opts,
-        until: Date.now() + BROADCAST_REPLAY_MS,
-      };
-    }
+    // A NAMED navigation supersedes a broadcast: without clearing it, a surface mounting
+    // just after (a tab switch during the window) would replay the older, page-wide jump on
+    // top of the specific one the user just made.
+    lastBroadcast.current = named
+      ? undefined
+      : {
+          t: req.t,
+          opts: req.opts,
+          until: Date.now() + BROADCAST_REPLAY_MS,
+        };
     for (const api of targets) api.scrollToTime(req.t, scrollOptsFor(req.opts));
     // D15: History registered a seeker, the Review page did not — see `registerSeek`.
     if (req.opts?.seek !== false) seekRef.current?.(req.t);
