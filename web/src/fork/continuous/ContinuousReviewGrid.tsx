@@ -163,7 +163,10 @@ export function ContinuousReviewGrid({
     return out;
   }, [items, columns]);
 
-  const onNearEnd = useCallback(() => ctx.loadOlder(), [ctx]);
+  // `ctx.loadOlder`, not `ctx`: the context object is a new identity on every provider
+  // render, and this callback's identity is what re-arms the near-end effect.
+  const ctxLoadOlder = ctx.loadOlder;
+  const onNearEnd = useCallback(() => ctxLoadOlder(), [ctxLoadOlder]);
   const estimate = useCallback(() => rowHeight, [rowHeight]);
   const win = useItemWindow({
     scrollRef: contentRef as MutableRefObject<HTMLDivElement>,
@@ -208,8 +211,6 @@ export function ContinuousReviewGrid({
 
   // §9.3: pinned to the newest edge? The chip is meaningless there and the provider clears
   // its counter. STICK_THRESHOLD is in useItemWindow; one card height is far too coarse.
-  // The cleanup also FORGETS the surface: on unmount (a Review tab switch) a stale entry
-  // would latch `allAtTop` off for the rest of the session and the chip with it.
   const reportAtTop = ctx.reportAtTop;
   const forgetSurface = ctx.forgetSurface;
   useEffect(() => {
@@ -218,11 +219,13 @@ export function ContinuousReviewGrid({
     const onScroll = () => reportAtTop("grid", el.scrollTop < 24);
     onScroll();
     el.addEventListener("scroll", onScroll, { passive: true });
-    return () => {
-      el.removeEventListener("scroll", onScroll);
-      forgetSurface("grid");
-    };
-  }, [contentRef, reportAtTop, forgetSurface, items.length]);
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [contentRef, reportAtTop, items.length]);
+  // Retiring the surface is a MOUNT-scoped concern and gets its own effect: folded into
+  // the listener effect above it re-ran on every `items.length` change, and a forget +
+  // re-report is two provider state updates per page arrival — pure render churn on the
+  // one component that decides when to load more (see `useItemWindow`).
+  useEffect(() => () => forgetSurface("grid"), [forgetSurface]);
 
   // --- navigation registry (§2A.3 / D14) ---------------------------------------------
   useEffect(

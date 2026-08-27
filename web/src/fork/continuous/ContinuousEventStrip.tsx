@@ -114,7 +114,10 @@ export function ContinuousEventStrip({
     [count, startAligned, segmentDuration],
   );
 
-  const onNearBottom = useCallback(() => ctx.loadOlder(), [ctx]);
+  // `ctx.loadOlder`, not `ctx`: the context object is a new identity on every provider
+  // render, and this callback's identity is what re-arms the near-end effect.
+  const ctxLoadOlder = ctx.loadOlder;
+  const onNearBottom = useCallback(() => ctxLoadOlder(), [ctxLoadOlder]);
   const win = useFixedPitchWindow({
     scrollRef,
     count,
@@ -229,13 +232,17 @@ export function ContinuousEventStrip({
     [ctx, startAligned, segmentDuration, count, win],
   );
 
-  // The effect RETURNS the disposer: on unmount (a Review tab switch) the entry has to
-  // leave the map, or a stale `false` latches the "N new" chip on forever (§9.3).
+  // Two effects, not one. Reporting happens whenever `stickToTop` flips; RETIRING the
+  // surface happens only on unmount (a Review tab switch), because a stale `false` left in
+  // the map latches the "N new" chip on forever (§9.3). Returning the disposer from the
+  // reporting effect would also forget-and-re-report on every flip — two extra provider
+  // renders for nothing.
   const reportAtTop = ctx.reportAtTop;
-  useEffect(
-    () => reportAtTop("strip", win.stickToTop),
-    [reportAtTop, win.stickToTop],
-  );
+  const forgetSurface = ctx.forgetSurface;
+  useEffect(() => {
+    reportAtTop("strip", win.stickToTop);
+  }, [reportAtTop, win.stickToTop]);
+  useEffect(() => () => forgetSurface("strip"), [forgetSurface]);
 
   const rows = useMemo(() => {
     const out: number[] = [];

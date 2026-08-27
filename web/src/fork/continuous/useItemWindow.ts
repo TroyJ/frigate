@@ -8,8 +8,8 @@
  *    prepended items so nothing on screen moves (§9.2) unless the user is stuck to the
  *    top (§9.3). TanStack then corrects estimate→measured deltas for items above the
  *    viewport itself (`shouldAdjustScrollPositionOnItemSizeChange`).
- *  - `onNearEnd` fires when the last rendered index is within LOAD_OLDER_ITEMS of the end;
- *    the provider's page grid makes repeated calls idempotent (F12).
+ *  - `onNearEnd` fires when less than one viewport of loaded content remains below the
+ *    scroll position; the provider's page grid makes repeated calls idempotent (F12).
  *  - Family C cells (ReviewGroup) change height after mount; `measureElement` on each row
  *    handles it — callers must attach `virtualizer.measureElement` as the row ref.
  */
@@ -22,7 +22,21 @@ import {
 } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
-export const LOAD_OLDER_ITEMS = 12;
+/**
+ * Extend the window when less than this much loaded content is left below the viewport,
+ * as a multiple of the viewport height. A PIXEL distance, deliberately not an item count.
+ *
+ * It used to be `last.index >= items.length - 12`, calibrated when this virtualized one
+ * CARD per index (12 cards ≈ one screenful). The Review grid now virtualizes by ROW at a
+ * measured ~256 px pitch (§9.2), so the same 12 became three screenfuls of lookahead: on a
+ * plain page load, with nobody scrolling, the grid chained the shared window ~16 days deep
+ * in under two seconds and spent five `/review` pages doing it. Distance-from-the-bottom is
+ * the honest rule and it is unit-correct for both consumers — rows in the grid, cards in
+ * `ContinuousEventList`.
+ */
+const LOOKAHEAD_VIEWPORTS = 1;
+/** Before layout `clientHeight` is 0; without a floor, an empty list would never extend. */
+const MIN_LOOKAHEAD_PX = 400;
 export const STICK_THRESHOLD_PX = 24;
 
 export function useItemWindow<T extends { id: string }>(params: {
@@ -198,16 +212,28 @@ export function useItemWindow<T extends { id: string }>(params: {
   }, [scrollRef]);
 
   const virtualItems = virtualizer.getVirtualItems();
-  const last = virtualItems[virtualItems.length - 1];
   // Fire in an effect, NOT during render: `onNearEnd` is `ctx.loadOlder`, which sets state
   // on the PROVIDER — a render-phase update of a different component, which React warns
   // about and which can drop the update. `nearEnd` stays true while the user sits at the
   // bottom, so the effect re-fires on every `items.length` change and the window keeps
   // chaining; repeated calls are idempotent against the provider's page grid (F12).
-  const nearEnd = !!(last && last.index >= items.length - LOAD_OLDER_ITEMS);
+  const viewport = scrollRef.current?.clientHeight ?? 0;
+  const remainingPx =
+    virtualizer.getTotalSize() - (virtualizer.scrollOffset ?? 0) - viewport;
+  const nearEnd =
+    items.length > 0 &&
+    remainingPx <= Math.max(viewport * LOOKAHEAD_VIEWPORTS, MIN_LOOKAHEAD_PX);
+  // The callback is held in a REF and kept out of the deps on purpose. Callers build it
+  // from the context object (`() => ctx.loadOlder()`), whose identity changes on every
+  // provider render — with it in the deps this effect re-ran on provider state that has
+  // nothing to do with scrolling, and each re-run spent another page of the in-flight
+  // allowance. Measured: seven extensions in 160 ms with `items`, `lastIndex` and the
+  // scroll position all unchanged.
+  const onNearEndRef = useRef(onNearEnd);
+  onNearEndRef.current = onNearEnd;
   useEffect(() => {
-    if (nearEnd) onNearEnd?.();
-  }, [nearEnd, items.length, onNearEnd]);
+    if (nearEnd) onNearEndRef.current?.();
+  }, [nearEnd, items.length]);
 
   const scrollToId = useCallback(
     (
