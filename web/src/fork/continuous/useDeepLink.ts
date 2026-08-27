@@ -287,18 +287,20 @@ export function useContinuousDeepLink({
             severity: review.severity,
             tab: request.tab,
           });
-        } else if (
-          // `withReviewedFlag` is a second round-trip, so re-check the token after it
-          await (async () => {
-            const full = await withReviewedFlag(review);
-            if (handled.current !== token) return false;
-            return latest.current.revealOnReviewPage?.(full) ?? false;
-          })()
-        ) {
-          // D19: we changed what the page shows in order to reach the target — say so.
-          setResolveProblem((prev) =>
-            preferResolveProblem(prev, "filters-adjusted"),
-          );
+        } else {
+          // `withReviewedFlag` is a SECOND round-trip, so the token has to be re-checked
+          // after it — and at STATEMENT level, so the whole continuation stops. Suppressing
+          // only the reveal let execution fall through to `setNav` below, which is the one
+          // line that actually moves the page: a slow link-1 lookup landing after link 2 had
+          // navigated would have sent the user to link 1's moment.
+          const full = await withReviewedFlag(review);
+          if (handled.current !== token) return;
+          if (latest.current.revealOnReviewPage?.(full)) {
+            // D19: we changed what the page shows in order to reach the target — say so.
+            setResolveProblem((prev) =>
+              preferResolveProblem(prev, "filters-adjusted"),
+            );
+          }
         }
         setNav({
           t: startTime,

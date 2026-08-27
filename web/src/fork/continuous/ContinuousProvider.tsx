@@ -420,8 +420,13 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
    * that has been requested and abandoned. Assigned inside the updater rather than in the
    * effect body, because the updater is the moment the pages enter the map — an assignment
    * in the body is true one commit too early, which is precisely the window the bug lived in.
+   *
+   * It starts at NOW, not at `oldest`: before the effect has run for the first time, nothing
+   * has been planned at all — claiming the initial 24 h was already planned is the same
+   * false-positive on the very first navigation, and it is the same reasoning as the
+   * filter-change reset.
    */
-  const plannedOldest = useRef(oldest);
+  const plannedOldest = useRef(Math.floor(Date.now() / 1000));
 
   // keep every page between oldest and newest requested
   useEffect(() => {
@@ -869,6 +874,12 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
       now: Date.now(),
       deadline: req.deadline,
     });
+    // A NAMED navigation supersedes any parked broadcast, from the moment it is ISSUED —
+    // not when it eventually lands. Clearing it only on the `go` path left a deferred or
+    // waiting named nav (a deep link whose surface has not mounted, or one still waiting for
+    // its item) with the older page-wide jump replayable underneath it, which is the exact
+    // ordering in which a `?surface=history` link arrives.
+    if (named) lastBroadcast.current = undefined;
     if (step === "defer") {
       // The surface has not mounted yet — a `?surface=history` deep link navigates before
       // `RecordingView` exists. `registerSurface` replays it on mount.
@@ -886,16 +897,13 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
       );
       return () => clearTimeout(timer);
     }
-    // A NAMED navigation supersedes a broadcast: without clearing it, a surface mounting
-    // just after (a tab switch during the window) would replay the older, page-wide jump on
-    // top of the specific one the user just made.
-    lastBroadcast.current = named
-      ? undefined
-      : {
-          t: req.t,
-          opts: req.opts,
-          until: Date.now() + BROADCAST_REPLAY_MS,
-        };
+    if (!named) {
+      lastBroadcast.current = {
+        t: req.t,
+        opts: req.opts,
+        until: Date.now() + BROADCAST_REPLAY_MS,
+      };
+    }
     for (const api of targets) api.scrollToTime(req.t, scrollOptsFor(req.opts));
     // D15: History registered a seeker, the Review page did not — see `registerSeek`.
     if (req.opts?.seek !== false) seekRef.current?.(req.t);
