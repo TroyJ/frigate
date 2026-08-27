@@ -92,6 +92,25 @@ export class FetchQueue {
     for (const j of [...this.running.values()]) j.controller.abort();
   }
 
+  /**
+   * Abort every job whose key starts with `prefix`.
+   *
+   * For the heavy pages, the key prefix IS the `(cameras, motionScale, unavailScale)`
+   * family — and when the family changes (a zoom, or D24's pin engaging) every job queued
+   * under the old one is instantly worthless: it fetches the same seconds at a different
+   * resolution, against the single worker, ahead of the pages the user is now looking at.
+   * `cancel()` alone cannot express that, because the caller no longer knows the old keys.
+   * Measured before this existed: scrolling from now to 31 days back at the finest zoom
+   * left six fine-scale day-pages queued, still going out ten seconds after the pin had
+   * engaged — i.e. the exact cost D24 is for, arriving anyway.
+   */
+  cancelPrefix(prefix: string) {
+    for (const j of [...this.queue])
+      if (j.key.startsWith(prefix)) this.cancel(j.key);
+    for (const j of [...this.running.values()])
+      if (j.key.startsWith(prefix)) j.controller.abort();
+  }
+
   private pump() {
     while (this.running.size < this.concurrency && this.queue.length) {
       const job = this.queue.shift()!;

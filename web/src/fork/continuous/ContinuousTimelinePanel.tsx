@@ -7,6 +7,16 @@
  *   detail   → ContinuousDetailStream (S6, K2 — Phase 4; interim upstream DetailStream)
  * Zoom state, the three-way tab layout classes and the export-handle wiring mirror
  * upstream's `Timeline` so RecordingView needs no other change.
+ *
+ * Two Phase-9 depth guards live at this level, because this is where both knobs are owned:
+ *  - **F14/D20, the export cap.** The handles are clamped to the strip, and the strip is now
+ *    fifteen months long. `exportClamp.ts` says why 24 h and why "clamped WITH a message"
+ *    rather than silently truncated; the message is rendered here, carrying the applied
+ *    range so it is assertable.
+ *  - **D24, zoom pinning.** Past the pin depth the finer levels are simply not offered
+ *    (upstream disables its own zoom-in button at the end of the list, so truncating the
+ *    list is the whole fix and needs no upstream change), and a notice says why. The
+ *    request-scale half of D24 is in the strip — see zoomPin.ts.
  */
 import {
   MutableRefObject,
@@ -30,6 +40,16 @@ import { ContinuousEventList } from "./ContinuousEventList";
 import { ContinuousDetailStream } from "./ContinuousDetailStream";
 import { ContinuousNewChip } from "./ContinuousNewChip";
 import { useContinuousStrict } from "./ContinuousProvider";
+import {
+  clampExportRange,
+  movedHandle,
+  EXPORT_CLAMP_TEXT,
+} from "./exportClamp";
+import {
+  isZoomPinned,
+  PINNED_SEGMENT_DURATION,
+  ZOOM_PINNED_TEXT,
+} from "./zoomPin";
 
 export type ContinuousTimelinePanelProps = {
   contentRef: MutableRefObject<HTMLDivElement | null>;
@@ -103,34 +123,103 @@ export function ContinuousTimelinePanel({
     [activeReviewItem, items, currentTime],
   );
 
-  // zoom (mirrors upstream Timeline)
+  // zoom (mirrors upstream Timeline), with D24's pin on top
   const [zoomSettings, setZoomSettings] = useState(ZOOM_LEVELS[0]);
-  const handleZoomChange = useCallback(
-    (i: number) => setZoomSettings(ZOOM_LEVELS[i]),
-    [],
+  const [oldestVisible, setOldestVisible] = useState<number>();
+  const pinned = isZoomPinned(
+    oldestVisible ?? ctx.window.newest,
+    ctx.window.newest,
   );
-  const currentZoomLevel = ZOOM_LEVELS.findIndex(
+  /**
+   * The levels the control OFFERS. Truncating the list is enough on its own: upstream
+   * disables its zoom-in button when the current index is the last one, so a list of
+   * `[30 s]` renders exactly the "finer zoom buttons disabled" D24 asks for, with no
+   * upstream change at all.
+   *
+   * The one case that must not truncate is a user who was ALREADY at a finer pitch when
+   * they scrolled deep — their current level would fall off the list, `currentZoomLevel`
+   * would be −1, and upstream hides the whole control on that. Their view is not made
+   * cheaper by hiding the buttons anyway; the request-scale pin in the strip has already
+   * capped what that costs the box.
+   */
+  const zoomLevels = useMemo(() => {
+    if (!pinned) return ZOOM_LEVELS;
+    const allowed = ZOOM_LEVELS.filter(
+      (l) => l.segmentDuration >= PINNED_SEGMENT_DURATION,
+    );
+    return allowed.some(
+      (l) => l.segmentDuration === zoomSettings.segmentDuration,
+    )
+      ? allowed
+      : ZOOM_LEVELS;
+  }, [pinned, zoomSettings.segmentDuration]);
+  const handleZoomChange = useCallback(
+    (i: number) => {
+      const level = zoomLevels[i];
+      if (!level) return;
+      // belt and braces: the wheel-zoom hook drives this too, and it does not read the
+      // disabled state off the buttons
+      if (pinned && level.segmentDuration < PINNED_SEGMENT_DURATION) return;
+      setZoomSettings(level);
+    },
+    [zoomLevels, pinned],
+  );
+  const currentZoomLevel = zoomLevels.findIndex(
     (l) => l.segmentDuration === zoomSettings.segmentDuration,
   );
   const { isZooming, zoomDirection } = useTimelineZoom({
     zoomSettings,
-    zoomLevels: ZOOM_LEVELS,
+    zoomLevels,
     onZoomChange: handleZoomChange,
     timelineRef: selectedTimelineRef,
     timelineDuration: ctx.window.newest - ctx.window.oldest,
   });
 
-  // export handles (mirrors upstream)
+  // export handles (mirrors upstream) + F14/D20's cap
   const [exportStart, setExportStartTime] = useState<number>(0);
   const [exportEnd, setExportEndTime] = useState<number>(0);
+  const [exportClamped, setExportClamped] = useState<TimeRange>();
+  const lastAppliedExport = useRef<TimeRange>();
   useEffect(() => {
-    if (exportRange && exportStart != 0 && exportEnd != 0) {
-      if (exportRange.after != exportStart) setCurrentTime(exportStart);
-      else if (exportRange?.before != exportEnd) setCurrentTime(exportEnd);
-      setExportRange({ after: exportStart, before: exportEnd });
+    if (!exportRange) return;
+    /**
+     * Upstream requires BOTH handle times to be non-zero before it applies anything, and
+     * each is only set by dragging its own handle — so a user who drags only the start bar
+     * (the common gesture: bracket backwards from the playhead) writes no range at all, and
+     * on the fork that would mean the 24 h cap never ran on the exact drag F14 is about.
+     * The untouched handle is seeded from the range the dialog already set.
+     */
+    const exportStartTime = exportStart || exportRange.after;
+    const exportEndTime = exportEnd || exportRange.before;
+    if (
+      exportStartTime !== exportRange.after ||
+      exportEndTime !== exportRange.before
+    ) {
+      if (exportRange.after != exportStartTime) setCurrentTime(exportStartTime);
+      else if (exportRange?.before != exportEndTime)
+        setCurrentTime(exportEndTime);
+      // F14: the handles used to be capped at ~24 h purely because the strip WAS 24 h. It
+      // is now months long and nothing downstream guards the span — not ExportDialog, not
+      // `frigate/api/export.py`, which happily queries every Recordings row in range and
+      // starts an ffmpeg job that can occupy the Pi for hours and fill the disk.
+      const requested = { after: exportStartTime, before: exportEndTime };
+      const { range, clamped } = clampExportRange(
+        requested,
+        movedHandle(lastAppliedExport.current, requested),
+      );
+      lastAppliedExport.current = range;
+      setExportClamped(clamped ? range : undefined);
+      setExportRange(range);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [exportStart, exportEnd, setExportRange, setCurrentTime]);
+  // leaving export mode clears the notice with it
+  useEffect(() => {
+    if (exportRange === undefined) {
+      setExportClamped(undefined);
+      lastAppliedExport.current = undefined;
+    }
+  }, [exportRange]);
 
   return (
     <div
@@ -167,9 +256,31 @@ export function ContinuousTimelinePanel({
       {timelineType != "timeline" && (
         <ContinuousNewChip className="absolute inset-x-0 top-2 z-30" />
       )}
+      {/* F14/D20: clamped, and SAID SO. A silent truncation reads as "the drag broke".
+          `data-export-range` carries the range that was actually applied, so the gate can
+          assert the outcome rather than count pixels between two blue bars. */}
+      {exportClamped && (
+        <div
+          data-export-clamp="24h"
+          data-export-range={JSON.stringify(exportClamped)}
+          className="pointer-events-none absolute inset-x-1 top-1 z-40 rounded bg-destructive/90 px-1 py-0.5 text-center text-[10px] leading-tight text-white"
+        >
+          {EXPORT_CLAMP_TEXT}
+        </div>
+      )}
+      {/* D24: the buttons going quiet on their own is not an explanation. */}
+      {pinned && timelineType == "timeline" && (
+        <div
+          data-zoom-pinned="true"
+          className="pointer-events-none absolute inset-x-1 bottom-16 z-40 rounded bg-background/85 px-1 py-0.5 text-center text-[10px] leading-tight text-muted-foreground"
+        >
+          {ZOOM_PINNED_TEXT}
+        </div>
+      )}
       {timelineType == "timeline" ? (
         <ContinuousMotionStrip
           timelineRef={selectedTimelineRef}
+          onViewportChange={setOldestVisible}
           cameras={mainCamera}
           events={items}
           segmentDuration={zoomSettings.segmentDuration}
@@ -187,7 +298,7 @@ export function ContinuousTimelinePanel({
           isZooming={isZooming}
           zoomDirection={zoomDirection}
           onZoomChange={handleZoomChange}
-          possibleZoomLevels={ZOOM_LEVELS}
+          possibleZoomLevels={zoomLevels}
           currentZoomLevel={currentZoomLevel}
         />
       ) : timelineType == "detail" ? (

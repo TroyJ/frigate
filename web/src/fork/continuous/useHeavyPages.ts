@@ -54,6 +54,15 @@ export function useHeavyPages(params: {
   /** The time range currently on screen (newest `before`, oldest `after`). */
   visible: { after: number; before: number } | undefined;
   /**
+   * D24, the half that survives a transient viewport reading: the scale a page is FETCHED
+   * at, as a function of the page's own age. The viewport-based pin (see zoomPin.ts) drives
+   * the zoom controls and the family key, but `win.visible` moves under a big scroll and a
+   * single frame of shallow reading is enough to send a three-week-old page out at
+   * `scale=3` — 28,800 buckets of a day, against a single worker. A page's own depth cannot
+   * flicker, so this is the floor that actually protects the box. Omit for no floor.
+   */
+  scaleFor?: (pageAfter: number) => { motion: number; unavail: number };
+  /**
    * The provider's tail tick (§9.4). There is no push channel for historical motion, so
    * the page containing `now` is dropped and re-requested every time this changes; every
    * older page is immutable and is never refetched. Omit to disable tail polling.
@@ -68,9 +77,14 @@ export function useHeavyPages(params: {
     motionScale,
     unavailScale,
     visible,
+    scaleFor,
     tailTick,
     enabled = true,
   } = params;
+  // held in a ref: `scaleFor` closes over `newest`, which ticks every 30 s, and the fetch
+  // effect must not re-run for that
+  const scaleForRef = useRef(scaleFor);
+  scaleForRef.current = scaleFor;
   const fam = familyKey(cameras, motionScale, unavailScale);
   const [version, bump] = useState(0);
   const rerender = useCallback(() => bump((n) => n + 1), []);
@@ -84,6 +98,24 @@ export function useHeavyPages(params: {
   }, [fam]);
 
   const wantedRef = useRef<Set<number>>(new Set());
+
+  /**
+   * A scale change orphans the previous family's queued jobs.
+   *
+   * `familyKey` includes the scales, so zooming — or D24's pin engaging — swaps `pages` for
+   * a different Map and leaves `wantedRef` holding keys from the OLD family. The abort loop
+   * below then cancels `${newFam}:${after}`, which matches nothing, and the old jobs sit in
+   * the serialised queue and go out anyway: measured, six fine-scale day-pages still being
+   * requested ten seconds after the viewport had gone past the pin depth. Cancel the whole
+   * family instead, by prefix, the moment it changes.
+   */
+  const famRef = useRef(fam);
+  useEffect(() => {
+    if (famRef.current === fam) return;
+    queue.cancelPrefix(`${famRef.current}:`);
+    famRef.current = fam;
+    wantedRef.current = new Set();
+  }, [fam, queue]);
 
   // §9.4 tail poll. Declared BEFORE the fetch effect on purpose: React runs effects in
   // declaration order, so on a tick this deletes the live page and the fetch effect below
@@ -159,8 +191,12 @@ export function useHeavyPages(params: {
         .enqueue(
           `${fam}:${p.after}`,
           async (signal) => {
+            const scales = scaleForRef.current?.(p.after) ?? {
+              motion: motionScale,
+              unavail: unavailScale,
+            };
             const m = await axios.get<MotionData[]>("review/activity/motion", {
-              params: { before, after: p.after, scale: motionScale, cameras },
+              params: { before, after: p.after, scale: scales.motion, cameras },
               signal,
             });
             const u = await axios.get<RecordingSegment[]>(
@@ -169,7 +205,7 @@ export function useHeavyPages(params: {
                 params: {
                   before,
                   after: p.after,
-                  scale: unavailScale,
+                  scale: scales.unavail,
                   cameras,
                 },
                 signal,
