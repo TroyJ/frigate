@@ -310,18 +310,69 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
     "recordings/summary",
     { timezone: tz, cameras: filter.cameras ?? null },
   ]);
+  const recDayKeys = useMemo(
+    () => Object.keys(recordingsSummary ?? {}).sort(),
+    [recordingsSummary],
+  );
+  const horizonCameras = useMemo(() => {
+    const named = (filter.cameras ?? "").split(",").filter(Boolean);
+    return (named.length ? named : Object.keys(config?.cameras ?? {})).sort();
+  }, [filter.cameras, config]);
+
+  /**
+   * D7/§14.1a's horizon W, to the HOUR rather than to the day.
+   *
+   * `/recordings/summary` answers in day keys, so deriving W from it puts the
+   * expired-vs-outage boundary at 00:00 of the oldest recorded day — and the free-space
+   * reaper does not stop on a day boundary. Measured on this box: the oldest recording day
+   * is 2026-08-23 and its oldest retained HOUR is 10:00, so ten hours of ordinarily
+   * reaped footage was being labelled "camera unavailable" (and drawn with the alert tint)
+   * on exactly the deepest day a reader looks at. That is asserting a cause we do not have.
+   *
+   * The per-camera summary carries the hours, so one bounded, cached request per camera
+   * gets W to within the hour. Until it lands the day start is used — the weaker, older
+   * answer — rather than blocking the strip.
+   */
+  const { data: horizonBySummary } = useSWR<number | undefined>(
+    recDayKeys.length && horizonCameras.length
+      ? ["fork/recording-horizon", tz, recDayKeys[0], horizonCameras.join(",")]
+      : null,
+    async () => {
+      const dayStart = dayKeyToStartInTz(recDayKeys[0], tz);
+      const perCamera = await Promise.all(
+        horizonCameras.map(async (cam) => {
+          try {
+            const { data } = await axios.get<
+              { day: string; hours: { hour: string }[] }[]
+            >(`${cam}/recordings/summary`, { params: { timezone: tz } });
+            const day = (data ?? []).find((d) => d.day === recDayKeys[0]);
+            const hours = (day?.hours ?? [])
+              .map((h) => parseInt(h.hour, 10))
+              .filter((h) => Number.isFinite(h));
+            return hours.length
+              ? dayStart + Math.min(...hours) * HOUR
+              : undefined;
+          } catch {
+            return undefined;
+          }
+        }),
+      );
+      const known = perCamera.filter((v): v is number => v !== undefined);
+      return known.length ? Math.min(...known) : undefined;
+    },
+  );
+
   const extent = useMemo(() => {
     const days = Object.keys(reviewSummary ?? {})
       .filter((k) => k !== "last24Hours")
       .sort();
-    const recDays = Object.keys(recordingsSummary ?? {}).sort();
     return {
       oldestReview: days.length ? dayKeyToStartInTz(days[0], tz) : undefined,
-      oldestRecording: recDays.length
-        ? dayKeyToStartInTz(recDays[0], tz)
-        : undefined,
+      oldestRecording:
+        horizonBySummary ??
+        (recDayKeys.length ? dayKeyToStartInTz(recDayKeys[0], tz) : undefined),
     };
-  }, [reviewSummary, recordingsSummary, tz]);
+  }, [reviewSummary, recDayKeys, horizonBySummary, tz]);
   const floor = useMemo(() => {
     const candidates = [extent.oldestReview, extent.oldestRecording].filter(
       (v): v is number => v !== undefined,
