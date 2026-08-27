@@ -26,7 +26,12 @@
  * day's end.
  * D9/F15/F17: a review whose camera, config entry or thumbnail has gone is an expected
  * state at depth — the cell degrades, it must never throw, so nothing here dereferences
- * `config.cameras[review.camera]`.
+ * `config.cameras[review.camera]`. It LOOKS it up (Phase 9) and swaps in
+ * `DegradedReviewCell` when the answer is "not there"; a reaped thumbnail is caught by a
+ * capture-phase `error` listener on the row, because `error` does not bubble and the cell
+ * that owns the `<img>` is upstream's.
+ * F19 (Phase 9): mirrored reviews are collapsed here, on S1 only — the strips draw bands,
+ * and two rows with a byte-identical `start_time` occupy the same band either way.
  */
 import {
   MutableRefObject,
@@ -37,14 +42,18 @@ import {
   useRef,
   useState,
 } from "react";
+import useSWR from "swr";
 import { cn } from "@/lib/utils";
 import { Preview } from "@/types/preview";
 import { ReviewSegment } from "@/types/review";
 import { TimeRange } from "@/types/timeline";
+import { FrigateConfig } from "@/types/frigateConfig";
 import PreviewThumbnailPlayer from "@/components/player/PreviewThumbnailPlayer";
 import { useContinuousStrict } from "./ContinuousProvider";
 import { useItemWindow } from "./useItemWindow";
 import { indexAtOrAfter } from "./dayNav";
+import { dedupeMirrors, mirrorMapFromConfig } from "./mirrors";
+import { DegradedReviewCell } from "./cells/DegradedReviewCell";
 
 /** Fallback until a row has been measured once (see `rowHeight` below). */
 const CARD_ESTIMATE = 240;
@@ -89,7 +98,7 @@ export type ContinuousReviewGridProps = {
 
 export function ContinuousReviewGrid({
   contentRef,
-  items,
+  items: rawItems,
   segmentDuration,
   selectedReviews,
   relevantPreviews,
@@ -101,6 +110,56 @@ export function ContinuousReviewGrid({
   onVisibleChange,
 }: ContinuousReviewGridProps) {
   const ctx = useContinuousStrict();
+  const { data: config } = useSWR<FrigateConfig>("config");
+
+  // --- F15 / F17 / F19 depth guards (Phase 9) -----------------------------------------
+  // The config is the ONLY thing that says whether a camera still exists. Read once here
+  // and passed down as a predicate — nothing in the render path indexes into it, so an
+  // absent camera is a value, never a throw.
+  const knownCameras = useMemo(
+    () => new Set(Object.keys(config?.cameras ?? {})),
+    [config],
+  );
+  const configLoaded = config != undefined;
+  const mirrors = useMemo(() => mirrorMapFromConfig(config), [config]);
+  // from the CONTEXT: `useUserPersistence` does not share state between hook instances
+  const dedupe = ctx.dedupeMirrors;
+  const items = useMemo(
+    () => (dedupe ? dedupeMirrors(rawItems, mirrors) : rawItems),
+    [rawItems, dedupe, mirrors],
+  );
+
+  /**
+   * Thumbnails that 404. `error` does not bubble, and the `<img>` belongs to upstream's
+   * imported cell, so this is a capture-phase listener on the grid container — one
+   * listener for every card, instead of a prop upstream does not have. The set is state
+   * (a re-render must follow) and keyed by review id, so a card that scrolls out and back
+   * under virtualization does not re-probe a URL already known to be gone.
+   */
+  const [deadThumbs, setDeadThumbs] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const gridRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = gridRef.current;
+    if (!el) return;
+    const onError = (e: Event) => {
+      const target = e.target as HTMLElement | null;
+      if (!target || target.tagName !== "IMG") return;
+      const id = target
+        .closest("[data-continuous-id]")
+        ?.getAttribute("data-continuous-id");
+      if (!id) return;
+      setDeadThumbs((prev) => {
+        if (prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.add(id);
+        return next;
+      });
+    };
+    el.addEventListener("error", onError, true);
+    return () => el.removeEventListener("error", onError, true);
+  }, []);
 
   const [columns, setColumns] = useState(() =>
     columnsForWidth(typeof window === "undefined" ? 1280 : window.innerWidth),
@@ -271,6 +330,7 @@ export function ContinuousReviewGrid({
 
   return (
     <div
+      ref={gridRef}
       className="relative w-full px-1 md:mx-2"
       style={{ height: `${win.virtualizer.getTotalSize()}px` }}
     >
@@ -322,17 +382,37 @@ export function ContinuousReviewGrid({
                   style={{ width: `${100 / columns}%` }}
                 >
                   <div className="aspect-video overflow-hidden rounded-lg">
-                    <PreviewThumbnailPlayer
-                      review={review}
-                      allPreviews={relevantPreviews}
-                      timeRange={timeRange}
-                      setReviewed={markItemAsReviewed}
-                      scrollLock={scrollLock}
-                      onTimeUpdate={onPreviewTimeUpdate}
-                      onClick={(rev, ctrl, detail) =>
-                        onSelectReview(rev, ctrl, detail)
-                      }
-                    />
+                    {/* D9/F15: the camera has left the config. Wait for the config to
+                        actually arrive before judging — `knownCameras` is empty for the
+                        first frames and every card would degrade. */}
+                    {configLoaded && !knownCameras.has(review.camera) ? (
+                      <DegradedReviewCell
+                        review={review}
+                        reason="camera-missing"
+                        tz={ctx.tz}
+                      />
+                    ) : deadThumbs.has(review.id) ? (
+                      /* F17: only the image is gone. The review — and very possibly the
+                         recording — is not, so this stays clickable. */
+                      <DegradedReviewCell
+                        review={review}
+                        reason="thumb-missing"
+                        tz={ctx.tz}
+                        onClick={() => onSelectReview(review, false, false)}
+                      />
+                    ) : (
+                      <PreviewThumbnailPlayer
+                        review={review}
+                        allPreviews={relevantPreviews}
+                        timeRange={timeRange}
+                        setReviewed={markItemAsReviewed}
+                        scrollLock={scrollLock}
+                        onTimeUpdate={onPreviewTimeUpdate}
+                        onClick={(rev, ctrl, detail) =>
+                          onSelectReview(rev, ctrl, detail)
+                        }
+                      />
+                    )}
                   </div>
                   <div
                     className={cn(
