@@ -37,6 +37,7 @@ import { TimeRange } from "@/types/timeline";
 import { useTimezone } from "@/hooks/use-date-utils";
 import { useFrigateReviews } from "@/api/ws";
 import { useContinuousEnabled } from "./useContinuousEnabled";
+import { useDedupeMirrors } from "./useDedupeMirrors";
 import { FetchQueue, isAbort } from "./fetchQueue";
 import {
   ReviewPage,
@@ -120,6 +121,16 @@ export type ContinuousFilter = {
 
 export type ContinuousContextValue = {
   enabled: boolean;
+  /**
+   * F19: collapse mirrored reviews on S1 (one row per EVENT, not per camera).
+   *
+   * It lives on the CONTEXT rather than in each component, because `useUserPersistence` is
+   * per-hook-instance state over IndexedDB — two components calling it do not see each
+   * other's writes. Measured: the header toggle flipped its own label and the grid went on
+   * de-duplicating regardless, so the control looked broken while the data was untouched.
+   */
+  dedupeMirrors: boolean;
+  setDedupeMirrors: (v: boolean) => void;
   tz: string;
   /** Tail tick: epoch seconds, advanced every TAIL_TICK_MS while visible. */
   now: number;
@@ -258,6 +269,7 @@ type Props = {
 
 export function ContinuousProvider({ filter, initialNav, children }: Props) {
   const [enabled, setEnabled, toggleLoaded] = useContinuousEnabled();
+  const [dedupeMirrors, setDedupeMirrors] = useDedupeMirrors();
   const { data: config } = useSWR<FrigateConfig>("config");
   const tz =
     useTimezone(config) ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -941,6 +953,8 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
   const value = useMemo<ContinuousContextValue>(
     () => ({
       enabled,
+      dedupeMirrors,
+      setDedupeMirrors,
       tz,
       now,
       window: { newest, oldest },
@@ -974,6 +988,8 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
     }),
     [
       enabled,
+      dedupeMirrors,
+      setDedupeMirrors,
       tz,
       now,
       newest,
