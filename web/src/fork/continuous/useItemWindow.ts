@@ -38,6 +38,15 @@ const LOOKAHEAD_VIEWPORTS = 1;
 /** Before layout `clientHeight` is 0; without a floor, an empty list would never extend. */
 const MIN_LOOKAHEAD_PX = 400;
 export const STICK_THRESHOLD_PX = 24;
+/**
+ * How many extensions an EMPTY surface may spend looking for something to show.
+ *
+ * Four 72 h pages is ~12 days of history, which covers the case this exists for — the box's
+ * recent days are all reviewed and the nearest unreviewed alert is a few days back (measured
+ * on 2026-08-27: two pages were enough) — while keeping a permanently-empty surface from
+ * chaining to the review floor. The budget resets the moment anything is displayable.
+ */
+export const MAX_EMPTY_EXTENSIONS = 4;
 
 export function useItemWindow<T extends { id: string }>(params: {
   scrollRef: RefObject<HTMLDivElement>;
@@ -62,6 +71,16 @@ export function useItemWindow<T extends { id: string }>(params: {
    * on a plain page load, which is the runaway the pixel rule above exists to prevent.
    */
   windowKey?: number;
+  /**
+   * Changes when the provider DISCARDS everything — a cameras/labels/zones change (§14.4).
+   *
+   * It exists because the empty-search budget below must start again there, and nothing else
+   * says so: that path calls `setPages(new Map())` and resets `oldest` WITHOUT remounting
+   * the surface, so a grid that had already spent its budget while empty would stay dead
+   * for the rest of the session — "no alerts to review" over a window that has just been
+   * thrown away, which is the very regression the budget's owner exists to prevent.
+   */
+  resetKey?: string;
 }) {
   const {
     scrollRef,
@@ -71,6 +90,7 @@ export function useItemWindow<T extends { id: string }>(params: {
     onNearEnd,
     lanes = 1,
     windowKey,
+    resetKey,
   } = params;
 
   const virtualizer = useVirtualizer({
@@ -82,6 +102,20 @@ export function useItemWindow<T extends { id: string }>(params: {
     lanes,
     getItemKey: (i) => items[i]?.id ?? i,
   });
+
+  /** Extensions spent while this surface had nothing to display — see `nearEnd`. */
+  const emptyExtensions = useRef(0);
+  const lastResetKey = useRef(resetKey);
+  if (lastResetKey.current !== resetKey) {
+    lastResetKey.current = resetKey;
+    emptyExtensions.current = 0;
+  }
+  if (items.length > 0 && emptyExtensions.current !== 0) {
+    // Reset during render, deliberately: `nearEnd` is computed during render too, so a
+    // budget reset that waited for an effect would leave one stale render deciding not to
+    // extend on a surface that has just been refilled (a filter change, say).
+    emptyExtensions.current = 0;
+  }
 
   /**
    * §9.2 — keep what the user is looking at exactly where it is.
@@ -237,9 +271,31 @@ export function useItemWindow<T extends { id: string }>(params: {
   const viewport = scrollRef.current?.clientHeight ?? 0;
   const remainingPx =
     virtualizer.getTotalSize() - (virtualizer.scrollOffset ?? 0) - viewport;
+  /**
+   * An EMPTY surface asks for more, whatever the scroll position says — but only so far.
+   *
+   * This used to be `items.length > 0 && …`, and that guard turned the most ordinary state
+   * on the box into a dead page: the Review grid hides reviewed items by default, so once
+   * you have cleared today's alerts — which is what the "Mark these items as reviewed"
+   * button is for, and what anyone keeping up with their alerts does daily — the initial
+   * 24 h window contains NOTHING to display. With nothing displayed there is no scroll, with
+   * no scroll `nearEnd` never became true, and the window sat at 24 h for ever. Measured on
+   * the live box with 420 unreviewed alerts two days back: "There are no alerts to review",
+   * `.review-item` count 0, and not one further `/review` page requested.
+   *
+   * The CAP is the other half, and it is not optional: three surfaces share this hook and
+   * they share ONE window. `ContinuousDetailStream` on a quiet camera, or the events list
+   * with everything filtered out, is legitimately empty for days — and without a bound it
+   * would walk the shared window to the ~31-day floor on its own, spending a dozen `/review`
+   * pages that nobody asked for. That is the runaway this file already has one rule against
+   * (see LOOKAHEAD_VIEWPORTS). "Look a few pages back for something to show, then stop and
+   * let the user ask" is the whole rule; the budget resets as soon as anything is displayed.
+   */
   const nearEnd =
-    items.length > 0 &&
-    remainingPx <= Math.max(viewport * LOOKAHEAD_VIEWPORTS, MIN_LOOKAHEAD_PX);
+    items.length === 0
+      ? emptyExtensions.current < MAX_EMPTY_EXTENSIONS
+      : remainingPx <=
+        Math.max(viewport * LOOKAHEAD_VIEWPORTS, MIN_LOOKAHEAD_PX);
   // The callback is held in a REF and kept out of the deps on purpose. Callers build it
   // from the context object (`() => ctx.loadOlder()`), whose identity changes on every
   // provider render — with it in the deps this effect re-ran on provider state that has
@@ -249,7 +305,9 @@ export function useItemWindow<T extends { id: string }>(params: {
   const onNearEndRef = useRef(onNearEnd);
   onNearEndRef.current = onNearEnd;
   useEffect(() => {
-    if (nearEnd) onNearEndRef.current?.();
+    if (!nearEnd) return;
+    if (items.length === 0) emptyExtensions.current += 1;
+    onNearEndRef.current?.();
   }, [nearEnd, items.length, windowKey]);
 
   const scrollToId = useCallback(

@@ -20,6 +20,7 @@ import axios from "axios";
 import SaveExportOverlay from "./SaveExportOverlay";
 import { isIOS, isMobile } from "react-device-detect";
 import { useTranslation } from "react-i18next";
+import { useContinuousDayJump } from "@/fork/continuous";
 
 type DrawerMode = "none" | "select" | "export" | "calendar" | "filter";
 
@@ -71,6 +72,8 @@ export default function MobileReviewSettingsDrawer({
 }: MobileReviewSettingsDrawerProps) {
   const { t } = useTranslation(["views/recording", "components/dialog"]);
   const [drawerMode, setDrawerMode] = useState<DrawerMode>("none");
+  // fork (continuous timeline seam, handover §8.4 / D1): the calendar is a navigator
+  const dayJump = useContinuousDayJump();
 
   // exports
 
@@ -235,12 +238,16 @@ export default function MobileReviewSettingsDrawer({
           <ReviewActivityCalendar
             reviewSummary={reviewSummary}
             recordingsSummary={recordingsSummary}
+            // fork (D1/D14): same navigator-not-filter rule as the desktop calendar in
+            // `ReviewFilterGroup` — one hook, so the two cannot drift apart.
             selectedDay={
-              filter?.after == undefined
+              dayJump.day ??
+              (filter?.after == undefined
                 ? undefined
-                : new Date(filter.after * 1000)
+                : new Date(filter.after * 1000))
             }
             onSelect={(day) => {
+              if (dayJump.jump(day)) return;
               onUpdateFilter({
                 ...filter,
                 after: day == undefined ? undefined : day.getTime() / 1000,

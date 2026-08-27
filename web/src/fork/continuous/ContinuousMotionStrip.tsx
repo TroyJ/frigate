@@ -33,6 +33,7 @@ import { useSegmentEventIndex } from "./useSegmentEventIndex";
 import { useHeavyPages } from "./useHeavyPages";
 import { SEGMENT_HEIGHT, useFixedPitchWindow } from "./useFixedPitchWindow";
 import { alignDown } from "./timeAlign";
+import { denseStripTarget } from "./navigation";
 
 export type ContinuousMotionStripProps = {
   cameras: string; // comma-separated, as the API takes it
@@ -124,6 +125,9 @@ export function ContinuousMotionStrip({
     startAligned,
     segmentDuration,
     onNearBottom,
+    // a page arriving is the only signal left once the strip is pinned at its bottom and
+    // stops emitting scroll events — see `windowKey`
+    windowKey: ctx.pagesLoaded,
   });
 
   // heavy pages for the visible range only (§10 rule 1)
@@ -185,13 +189,17 @@ export function ContinuousMotionStrip({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [segmentDuration]);
 
-  // navigation registry (§2A.3 / D14): scroll so t sits at the top of the viewport
+  // navigation registry (§2A.3 / D14): scroll so t sits at the top of the viewport. This is
+  // a DENSE strip, so a calendar day-jump lands on 00:00 box time (the day's oldest edge,
+  // at the top, so the user scrolls up through it) while a deep link or a segment click
+  // lands on the moment itself.
   useEffect(
     () =>
       ctx.registerSurface(surface, {
         scrollToTop: () => win.scrollToIndex(0, { align: "start" }),
-        scrollToTime: (t) => {
-          const index = Math.round((startAligned - t) / segmentDuration);
+        scrollToTime: (t, opts) => {
+          const target = denseStripTarget(t, opts?.intent, ctx.tz);
+          const index = Math.round((startAligned - target) / segmentDuration);
           win.scrollToIndex(Math.max(0, Math.min(count - 1, index)), {
             align: "start",
           });

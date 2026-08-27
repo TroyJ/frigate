@@ -60,6 +60,22 @@ type Params = {
   startAligned: number;
   segmentDuration: number;
   onNearBottom?: () => void;
+  /**
+   * A value that changes when a review page ARRIVES — callers pass `ctx.pagesLoaded`.
+   *
+   * Without it this surface can stop extending for good. `onNearBottom` is only evaluated
+   * from `update()`, which runs on SCROLL events — and a scroller already pinned at its
+   * maximum emits none, whether the user is pushing against the bottom or a gate is setting
+   * `scrollTop = scrollHeight` again. So when `loadOlder` happens to no-op (it does exactly
+   * that while `MAX_INFLIGHT_PAGES` are in flight), nothing re-tries once those pages land:
+   * measured on the History strip as 30 pulls at 744 h against a 763 h floor with only 8
+   * `/review` requests in 51 s — the app had stopped asking, one page short of the bottom.
+   *
+   * It must be an ARRIVAL counter, never the window edge: the edge is `loadOlder`'s own
+   * output, and keying a load-more trigger on its own side effect is the runaway this build
+   * has already paid for twice (see `useItemWindow`).
+   */
+  windowKey?: number;
 };
 
 export function useFixedPitchWindow({
@@ -68,6 +84,7 @@ export function useFixedPitchWindow({
   startAligned,
   segmentDuration,
   onNearBottom,
+  windowKey,
 }: Params): FixedPitchWindow {
   const [visible, setVisible] = useState({ start: 0, end: 0 });
   const stickRef = useRef(true);
@@ -97,6 +114,17 @@ export function useFixedPitchWindow({
     }
     if (onNearBottom && end >= count - LOAD_OLDER_ROWS) onNearBottom();
   }, [scrollRef, count, onNearBottom]);
+
+  // Re-evaluate when a page ARRIVES, not only when the user scrolls — see `windowKey`. The
+  // callback is held in a ref so this effect fires on arrivals alone; `update`'s identity
+  // changes with `count` and `onNearBottom`, and depending on it would re-arm the trigger on
+  // renders that have nothing to do with new data.
+  const updateRef = useRef(update);
+  updateRef.current = update;
+  useEffect(() => {
+    updateRef.current();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [windowKey]);
 
   // scroll + resize listeners, rAF-throttled and passive (upstream's pattern)
   useEffect(() => {

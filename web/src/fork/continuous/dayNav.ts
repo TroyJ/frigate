@@ -28,12 +28,25 @@
  * comparison `>= t`, and keep the scan running oldest → newest.
  */
 import { ReviewSegment } from "@/types/review";
-import { pagesFor } from "./timeAlign";
+import { dayKeyToStartInTz, pagesFor } from "./timeAlign";
 
 /**
- * Index of the OLDEST item whose `start_time >= t`, for a list sorted newest-first (D23).
+ * Index of the OLDEST item whose `start_time >= t`, for a list sorted newest-first (D23) —
+ * and, when several items share that exact `start_time`, the FIRST of them.
+ *
  * Returns 0 (the newest item) when everything loaded is older than `t`, and -1 only for an
  * empty list — callers may treat -1 as "nothing to scroll to".
+ *
+ * The tie rule is not hypothetical here. The villa's entrance unit is dual-sensor, so
+ * `entrance_high` and `entrance_tele` routinely emit two review segments with a
+ * byte-identical `start_time` (measured: `1787004201.308952` on both, and
+ * `1786636678.713004` in the harness's own notes). A day's earliest review is therefore
+ * regularly a PAIR, and returning the second of the pair moved the day-jump one card along —
+ * invisible until the pair straddles a row boundary on the 3-column grid, at which point the
+ * grid scrolls to the second twin's row and the first twin sits exactly one row ABOVE the
+ * viewport. Measured as `offsetTop -256` on a 240 px row, intermittently, because whether
+ * the pair straddles a boundary depends on how many items are in the list that second.
+ * Landing on the first of the tie puts the whole moment on screen.
  */
 export function indexAtOrAfter(
   items: Pick<ReviewSegment, "start_time">[],
@@ -41,9 +54,35 @@ export function indexAtOrAfter(
 ): number {
   if (!items.length) return -1;
   for (let i = items.length - 1; i >= 0; i--) {
-    if (items[i].start_time >= t) return i;
+    if (items[i].start_time >= t) {
+      let first = i;
+      while (first > 0 && items[first - 1].start_time === items[i].start_time) {
+        first--;
+      }
+      return first;
+    }
   }
   return 0;
+}
+
+/**
+ * 00:00 BOX time for the day the user actually clicked in the calendar (D14/D15).
+ *
+ * `ReviewActivityCalendar` renders through `react-day-picker`'s `timeZone` prop, so the
+ * object handed to `onSelect` is a `TZDate` whose `getFullYear/getMonth/getDate` read in the
+ * DISPLAY timezone — while a plain `Date` (any caller that does not pass `timeZone`) reads
+ * in the BROWSER's. Both are handled the same way here: take the Y-M-D the button was
+ * showing and re-resolve it as midnight in `tz`.
+ *
+ * What must NOT be used is `day.getTime() / 1000` (upstream's filter path) — that is
+ * midnight in whichever zone built the object, so a phone in Sydney opening the villa's
+ * calendar asks for a day that starts two hours early and ends two hours early, and the
+ * day's first two hours of review items are on the wrong day. §2A.6 / §13.
+ */
+export function dayStartFromPickedDate(day: Date, tz: string): number {
+  const mm = `0${day.getMonth() + 1}`.slice(-2);
+  const dd = `0${day.getDate()}`.slice(-2);
+  return dayKeyToStartInTz(`${day.getFullYear()}-${mm}-${dd}`, tz);
 }
 
 /**

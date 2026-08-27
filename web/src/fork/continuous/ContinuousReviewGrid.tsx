@@ -176,6 +176,8 @@ export function ContinuousReviewGrid({
     onNearEnd,
     // a page can land with no items this grid shows — see `windowKey`
     windowKey: ctx.pagesLoaded,
+    // a filter change discards every page without remounting us — see `resetKey`
+    resetKey: ctx.filterKey,
   });
 
   // --- S1 ⇄ S2 coupling: which items are actually on screen (see header) --------------
@@ -184,6 +186,7 @@ export function ContinuousReviewGrid({
     [selectedReviews],
   );
   const virtualItems = win.virtualItems;
+  const reportViewTime = ctx.reportViewTime;
   const reportRef = useRef<string>("");
   useEffect(() => {
     const el = contentRef.current;
@@ -209,7 +212,11 @@ export function ContinuousReviewGrid({
     if (key === reportRef.current) return;
     reportRef.current = key;
     onVisibleChange(range);
-  }, [virtualItems, rows, contentRef, onVisibleChange]);
+    // D1: the calendar FOLLOWS the surface instead of filtering it. The newest visible card
+    // is the day the user would say they are looking at; the provider only keeps day
+    // granularity, so this costs nothing at scroll rate.
+    reportViewTime(range.bounds.end);
+  }, [virtualItems, rows, contentRef, onVisibleChange, reportViewTime]);
 
   // §9.3: pinned to the newest edge? The chip is meaningless there and the provider clears
   // its counter. STICK_THRESHOLD is in useItemWindow; one card height is far too coarse.
@@ -240,10 +247,10 @@ export function ContinuousReviewGrid({
           const el = contentRef.current;
           if (el) el.scrollTop = 0;
         },
-        scrollToTime: (t, selectId) => {
+        scrollToTime: (t, opts) => {
           // indices are ROWS now, so an item index has to be divided down to its row
-          if (selectId) {
-            const i = items.findIndex((it) => it.id === selectId);
+          if (opts?.selectId) {
+            const i = items.findIndex((it) => it.id === opts.selectId);
             if (i >= 0) {
               win.scrollToIndex(Math.floor(i / columns), { align: "start" });
               return;
@@ -251,6 +258,9 @@ export function ContinuousReviewGrid({
           }
           // see dayNav.ts: one scan serves both a strip-segment click (pass the moment)
           // and a calendar day-jump (pass 00:00 box time → D14's day's-earliest-review).
+          // The intent needs no branch HERE — on a sparse surface "the first item at or
+          // after 00:00" IS the day's earliest review — and an empty day lands on the
+          // nearest item after it, which is the closest thing to a day with no cards.
           const idx = indexAtOrAfter(items, t);
           if (idx >= 0)
             win.scrollToIndex(Math.floor(idx / columns), { align: "start" });
@@ -281,7 +291,11 @@ export function ContinuousReviewGrid({
             }}
           >
             {row.cards.map((review) => {
-              const selected = selectedIds.has(review.id);
+              // D11: a deep link must HIGHLIGHT what it landed on, not merely scroll to it.
+              // `selectedReviews` is EventView's ctrl-click selection and knows nothing
+              // about a link, so the provider's `selectedId` rings the card the same way.
+              const linked = ctx.selectedId === review.id;
+              const selected = selectedIds.has(review.id) || linked;
               return (
                 <div
                   key={review.id}
@@ -291,6 +305,9 @@ export function ContinuousReviewGrid({
                   // all", a full row of jump. A card id is stable for the item's life.
                   data-continuous-id={review.id}
                   data-start={review.start_time}
+                  // the deep-link landing, assertable from a gate (the ring is a Tailwind
+                  // outline class and "is it highlighted" is not otherwise readable)
+                  data-continuous-linked={linked ? "true" : undefined}
                   // upstream's copied EventSegment finds this card by
                   // `[data-segment-start="<segStart - segmentDuration>"]` to flash its ring
                   // when a strip segment is clicked. Keep the attribute so that still works

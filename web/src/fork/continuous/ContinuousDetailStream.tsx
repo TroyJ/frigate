@@ -26,7 +26,7 @@ import { Switch } from "@/components/ui/switch";
 import ActivityIndicator from "@/components/indicators/activity-indicator";
 import { useContinuousStrict } from "./ContinuousProvider";
 import { useItemWindow } from "./useItemWindow";
-import { startOfNextDayInTz } from "./timeAlign";
+import { indexAtOrAfter } from "./dayNav";
 
 type Props = {
   items: ReviewSegment[];
@@ -75,6 +75,8 @@ export function ContinuousDetailStream({
     onNearEnd,
     // a page can land with no items this list shows — see `windowKey`
     windowKey: ctx.pagesLoaded,
+    // a filter change discards every page without remounting us — see `resetKey`
+    resetKey: ctx.filterKey,
     gap: 16,
   });
 
@@ -98,18 +100,18 @@ export function ContinuousDetailStream({
   useEffect(
     () =>
       ctx.registerSurface("detail", {
-        scrollToTime: (t, selectId) => {
-          if (selectId) {
-            setActiveId(selectId);
-            if (win.scrollToId(selectId)) return;
+        scrollToTime: (t, opts) => {
+          if (opts?.selectId) {
+            setActiveId(opts.selectId);
+            if (win.scrollToId(opts.selectId)) return;
           }
-          const nextDay = startOfNextDayInTz(t, ctx.tz);
-          for (let i = list.length - 1; i >= 0; i--) {
-            if (list[i].start_time < nextDay) {
-              win.scrollToIndex(i, { align: "start" });
-              return;
-            }
-          }
+          // `indexAtOrAfter`, not a scan for `start_time < startOfNextDay` from the oldest
+          // end — that scan matches the OLDEST loaded item on its first comparison, so
+          // every day-jump on this surface landed at the bottom of the stream. It is the
+          // same defect the sparse surfaces were fixed for in `.14`; S6 was missed because
+          // nothing navigated to it until Phase 8. One primitive, per dayNav.ts.
+          const idx = indexAtOrAfter(list, t);
+          if (idx >= 0) win.scrollToIndex(idx, { align: "start" });
         },
       }),
     [ctx, win, list],
