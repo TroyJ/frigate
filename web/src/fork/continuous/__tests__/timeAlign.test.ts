@@ -5,6 +5,7 @@ import {
   dayKeyToStartInTz,
   floorHourInTz,
   pagesFor,
+  sameHour,
   startOfNextDayInTz,
   startOfPrevDayInTz,
 } from "../timeAlign";
@@ -88,5 +89,27 @@ describe("pagesFor — deterministic hour-aligned grid", () => {
     expect(pages[pages.length - 1].before).toBeGreaterThanOrEqual(
       from + 7 * 86400,
     );
+  });
+});
+
+describe("sameHour", () => {
+  // "did the seek land?" is decided at chunk granularity — see RecordingView's
+  // `forkSeekLanding`. These are UTC hours, which is what playback chunks are cut on.
+  const h = 1787450400; // a whole hour boundary
+
+  it("is true inside one hour, including both edges of the open interval", () => {
+    expect(sameHour(h, h)).toBe(true);
+    expect(sameHour(h, h + 3599)).toBe(true);
+    expect(sameHour(h + 1, h + 1800)).toBe(true);
+  });
+
+  it("is false across the boundary, one second apart", () => {
+    expect(sameHour(h + 3599, h + 3600)).toBe(false);
+    expect(sameHour(h, h - 1)).toBe(false);
+  });
+
+  it("tolerates the fractional timestamps the player reports", () => {
+    expect(sameHour(h + 12.34, h + 12)).toBe(true);
+    expect(sameHour(h + 3599.9, h + 3600.1)).toBe(false);
   });
 });

@@ -30,6 +30,15 @@ export function alignUp(t: number, step: number): number {
 }
 
 /** Floor an epoch-seconds timestamp to the start of its hour in `tz`. */
+/**
+ * Do two moments fall in the same wall-clock hour? Playback chunks ARE hours (§9.5), so
+ * this is the granularity at which "the player got where it was asked to go" is decided —
+ * a seek lands on real footage, which the hour's gaps can move by seconds.
+ */
+export function sameHour(a: number, b: number): boolean {
+  return Math.floor(a / HOUR) === Math.floor(b / HOUR);
+}
+
 export function floorHourInTz(t: number, tz: string): number {
   const zoned = toZonedTime(t * 1000, tz);
   zoned.setMinutes(0, 0, 0);
