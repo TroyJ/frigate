@@ -61,3 +61,62 @@ export function denseStripTarget(
 ): number {
   return intent === "day" ? startOfDayInTz(t, tz) : t;
 }
+
+/** The subset of a loaded page this module needs — see `pagesSettled`. */
+export type PageRange = {
+  after: number;
+  before: number;
+  status: "queued" | "loading" | "done" | "error";
+};
+
+/**
+ * Has paging done everything it is going to do for `[from, to)`? — §2A.3 step 1.
+ *
+ * Asked as RANGE COVERAGE, not as page-key identity, and that is the whole point. The first
+ * version compared lattice keys, which has two failure modes that both present as a
+ * navigation hanging for its entire budget:
+ *
+ *  - **the tier flip.** `pageHours` drops 72 → 24 the first time a page is slow, and a deep
+ *    jump is exactly what trips that. Every key is then re-latticed by `snapToSpanGrid`, so
+ *    a wait keyed on the OLD keys waits for pages nobody will request, and a wait keyed on
+ *    the NEW keys waits for pages the request effect has not been re-run to ask for. Ranges
+ *    do not care which lattice produced them: 72 h pages and 24 h pages cover the same
+ *    seconds.
+ *  - **the abort path**, which DELETES a page from the map (see `fetchPage`). A key that has
+ *    gone is indistinguishable from a key that has not arrived yet — unless you ask whether
+ *    anything is still IN FLIGHT over the gap, which is what the second half of this does.
+ *
+ * So: settled means either the span is covered by pages that have finished (`done`, or
+ * `error` — a failed page is never coming), or nothing is loading over the first hole, in
+ * which case waiting longer cannot change the answer and the navigation should proceed
+ * against what did load rather than sit on a spinner (§2A.5).
+ */
+export function pagesSettled(
+  from: number,
+  to: number,
+  pages: Iterable<PageRange>,
+): boolean {
+  if (from >= to) return true;
+  const all = [...pages];
+  const finished = all
+    .filter((p) => p.status === "done" || p.status === "error")
+    .sort((a, b) => a.after - b.after);
+
+  // Walk the finished ranges from `from`, extending while they touch or overlap.
+  let cursor = from;
+  for (const p of finished) {
+    if (p.after > cursor) break; // a hole starts here
+    cursor = Math.max(cursor, p.before);
+    if (cursor >= to) return true;
+  }
+  if (cursor >= to) return true;
+
+  // There is a hole at `cursor`. Only worth waiting for if something is actually fetching
+  // over it.
+  return !all.some(
+    (p) =>
+      (p.status === "loading" || p.status === "queued") &&
+      p.before > cursor &&
+      p.after < to,
+  );
+}

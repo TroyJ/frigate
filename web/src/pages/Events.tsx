@@ -396,9 +396,6 @@ export default function Events() {
         true,
       ),
     revealOnReviewPage,
-    // §2A.4: `tab` is contract on its own, not only alongside `id` (this is the state
-    // upstream's own `useSearchEffect("tab")` set, and the fork owns the param now).
-    onTab: setNotificationTab,
     // A bare `?t=` still has to open SOME camera — the History scrubber is per-camera.
     // Prefer one the link's own filters named, else the first configured camera in ui order,
     // which is how upstream picks a default elsewhere. Undefined only on a camera-less

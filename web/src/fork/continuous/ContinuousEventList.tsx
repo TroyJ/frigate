@@ -47,6 +47,8 @@ export function ContinuousEventList({
     onNearEnd,
     // a page can land with no items this list shows — see `windowKey`
     windowKey: ctx.pagesLoaded,
+    // a filter change discards every page without remounting us — see `resetKey`
+    resetKey: ctx.filterKey,
     lanes: isMobile ? 2 : 1,
   });
 

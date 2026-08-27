@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEEP_LINK_PROBLEM_TEXT,
   parseDeepLink,
+  preferResolveProblem,
   parseMoment,
   parseTab,
   parseView,
@@ -133,5 +134,35 @@ describe("parseDeepLink", () => {
     for (const p of req?.problems ?? []) {
       expect(DEEP_LINK_PROBLEM_TEXT[p]?.length ?? 0).toBeGreaterThan(10);
     }
+  });
+});
+
+describe("preferResolveProblem (m4)", () => {
+  it("expired outranks the D19 filter note, whichever arrives first", () => {
+    // Both genuinely co-occur — a deep link to an old alert on the Review page relaxes the
+    // filters AND lands past the recording horizon — and arrival order is an axios
+    // continuation racing an SWR call, which says nothing about what the reader needs.
+    // §2A.5 makes "older than retention" the message that explains the blank player.
+    expect(preferResolveProblem("filters-adjusted", "footage-expired")).toBe(
+      "footage-expired",
+    );
+    expect(preferResolveProblem("footage-expired", "filters-adjusted")).toBe(
+      "footage-expired",
+    );
+  });
+
+  it("a gone review outranks everything", () => {
+    expect(preferResolveProblem("footage-expired", "review-missing")).toBe(
+      "review-missing",
+    );
+    expect(preferResolveProblem("review-missing", "footage-expired")).toBe(
+      "review-missing",
+    );
+  });
+
+  it("takes the first when there is nothing to compare against", () => {
+    expect(preferResolveProblem(undefined, "filters-adjusted")).toBe(
+      "filters-adjusted",
+    );
   });
 });

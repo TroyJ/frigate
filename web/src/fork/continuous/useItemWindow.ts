@@ -71,6 +71,16 @@ export function useItemWindow<T extends { id: string }>(params: {
    * on a plain page load, which is the runaway the pixel rule above exists to prevent.
    */
   windowKey?: number;
+  /**
+   * Changes when the provider DISCARDS everything — a cameras/labels/zones change (§14.4).
+   *
+   * It exists because the empty-search budget below must start again there, and nothing else
+   * says so: that path calls `setPages(new Map())` and resets `oldest` WITHOUT remounting
+   * the surface, so a grid that had already spent its budget while empty would stay dead
+   * for the rest of the session — "no alerts to review" over a window that has just been
+   * thrown away, which is the very regression the budget's owner exists to prevent.
+   */
+  resetKey?: string;
 }) {
   const {
     scrollRef,
@@ -80,6 +90,7 @@ export function useItemWindow<T extends { id: string }>(params: {
     onNearEnd,
     lanes = 1,
     windowKey,
+    resetKey,
   } = params;
 
   const virtualizer = useVirtualizer({
@@ -94,6 +105,11 @@ export function useItemWindow<T extends { id: string }>(params: {
 
   /** Extensions spent while this surface had nothing to display — see `nearEnd`. */
   const emptyExtensions = useRef(0);
+  const lastResetKey = useRef(resetKey);
+  if (lastResetKey.current !== resetKey) {
+    lastResetKey.current = resetKey;
+    emptyExtensions.current = 0;
+  }
   if (items.length > 0 && emptyExtensions.current !== 0) {
     // Reset during render, deliberately: `nearEnd` is computed during render too, so a
     // budget reset that waited for an effect would leave one stale render deciding not to

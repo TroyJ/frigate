@@ -10,7 +10,7 @@
  *    near it" failure D11 exists to remove.
  */
 import { describe, expect, it } from "vitest";
-import { denseStripTarget, planNavigation } from "../navigation";
+import { denseStripTarget, pagesSettled, planNavigation } from "../navigation";
 import { startOfDayInTz } from "../timeAlign";
 
 const BOX = "Asia/Makassar";
@@ -92,5 +92,63 @@ describe("denseStripTarget (D14)", () => {
     expect(inBox).toBe(Date.UTC(2026, 7, 20, 16) / 1000);
     expect(inUtc).toBe(Date.UTC(2026, 7, 20) / 1000);
     expect(inBox - inUtc).toBe(16 * 3600);
+  });
+});
+
+describe("pagesSettled", () => {
+  const done = (after: number, before: number) =>
+    ({ after, before, status: "done" }) as const;
+  const loading = (after: number, before: number) =>
+    ({ after, before, status: "loading" }) as const;
+
+  const H = 3600;
+  const DAY = 24 * H;
+
+  it("is settled when finished pages cover the span", () => {
+    expect(
+      pagesSettled(0, 3 * DAY, [done(0, 2 * DAY), done(2 * DAY, 4 * DAY)]),
+    ).toBe(true);
+  });
+
+  it("waits while a page is still loading over the hole", () => {
+    expect(
+      pagesSettled(0, 3 * DAY, [done(2 * DAY, 4 * DAY), loading(0, 2 * DAY)]),
+    ).toBe(false);
+  });
+
+  it("does not wait for a hole nothing is fetching — the ABORT path", () => {
+    // `fetchPage`'s abort branch DELETES the page, so its key simply vanishes. Keyed on
+    // identity that was indistinguishable from "not arrived yet" and burned the whole
+    // budget; as coverage, an unfetched hole with nothing in flight is finished business.
+    expect(pagesSettled(0, 3 * DAY, [done(2 * DAY, 4 * DAY)])).toBe(true);
+  });
+
+  it("does not care WHICH lattice covered the span — the slow-tier flip", () => {
+    // `pageHours` drops 72 → 24 the first time a page is slow, which a deep jump is exactly
+    // what causes, and every key is re-latticed. Mixed spans still cover the same seconds.
+    const mixed = [
+      done(0, 3 * DAY), // a 72 h page requested before the flip
+      done(3 * DAY, 4 * DAY), // 24 h pages after it
+      done(4 * DAY, 5 * DAY),
+    ];
+    expect(pagesSettled(0, 5 * DAY, mixed)).toBe(true);
+    // …and a genuine gap in the middle of a mixed set is still a gap
+    expect(pagesSettled(0, 6 * DAY, mixed)).toBe(true); // nothing in flight past 5 d
+    expect(
+      pagesSettled(0, 6 * DAY, [...mixed, loading(5 * DAY, 6 * DAY)]),
+    ).toBe(false);
+  });
+
+  it("treats a failed page as settled — it is never coming", () => {
+    expect(
+      pagesSettled(0, 2 * DAY, [
+        { after: 0, before: DAY, status: "error" },
+        done(DAY, 2 * DAY),
+      ]),
+    ).toBe(true);
+  });
+
+  it("an empty span is trivially settled", () => {
+    expect(pagesSettled(5, 5, [])).toBe(true);
   });
 });

@@ -33,10 +33,10 @@ import axios from "axios";
 import { REVIEW_PADDING, ReviewSegment, ReviewSeverity } from "@/types/review";
 import { TimelineType } from "@/types/timeline";
 import {
-  DEFAULT_TAB,
   DeepLinkProblem,
   DeepLinkRequest,
   parseDeepLink,
+  preferResolveProblem,
 } from "./deepLink";
 import { DeepLinkNav, SurfaceName } from "./ContinuousProvider";
 
@@ -50,8 +50,6 @@ export type DeepLinkOpen = {
 export type DeepLinkResult = {
   /** Pass to `<ContinuousProvider initialNav={…}>`; it runs once, after the toggle loads. */
   nav?: DeepLinkNav;
-  /** The validated `?tab=` (§2A.4) — `timeline` unless the link named a real one. */
-  tab: TimelineType;
   /** What the user is told about the link, if anything. */
   problem?: DeepLinkProblem;
   dismissProblem: () => void;
@@ -64,8 +62,6 @@ type Params = {
   openRecording: (open: DeepLinkOpen) => void;
   /** D19: relax the Review page's view so the target is visible. */
   revealOnReviewPage?: (review: ReviewSegment) => boolean;
-  /** Apply a validated `?tab=` (§2A.4) — it is contract even without an `id`. */
-  onTab?: (tab: TimelineType) => void;
   /** For a bare `?t=` on History, which camera to open. */
   cameraForMoment?: string;
   /** Oldest retained recording, for the "older than retention" case (§2A.5). */
@@ -121,7 +117,6 @@ export function useContinuousDeepLink({
   ready,
   openRecording,
   revealOnReviewPage,
-  onTab,
   cameraForMoment,
   oldestRecording,
 }: Params): DeepLinkResult {
@@ -139,9 +134,21 @@ export function useContinuousDeepLink({
    */
   const [parseProblem, setParseProblem] = useState<DeepLinkProblem>();
   const [resolveProblem, setResolveProblem] = useState<DeepLinkProblem>();
-  const [dismissed, setDismissed] = useState(false);
-  const problem = dismissed ? undefined : (resolveProblem ?? parseProblem);
-  const dismissProblem = useCallback(() => setDismissed(true), []);
+  /**
+   * The problem the user dismissed, BY VALUE rather than a boolean latch.
+   *
+   * A latch swallowed everything that came later: dismiss "that view no longer exists" while
+   * the id is still resolving and the "this alert no longer exists" that follows never
+   * appears — which is the §2A.5 silent failure, reintroduced by the mechanism meant to make
+   * the notice polite.
+   */
+  const [dismissedProblem, setDismissedProblem] = useState<DeepLinkProblem>();
+  const candidate = resolveProblem ?? parseProblem;
+  const problem = candidate === dismissedProblem ? undefined : candidate;
+  const dismissProblem = useCallback(
+    () => setDismissedProblem(candidate),
+    [candidate],
+  );
   /** The moment the link navigated to, for the late footage-expired check below. */
   const [navigatedStart, setNavigatedStart] = useState<number>();
 
@@ -162,13 +169,11 @@ export function useContinuousDeepLink({
   const latest = useRef({
     openRecording,
     revealOnReviewPage,
-    onTab,
     cameraForMoment,
   });
   latest.current = {
     openRecording,
     revealOnReviewPage,
-    onTab,
     cameraForMoment,
   };
 
@@ -183,24 +188,39 @@ export function useContinuousDeepLink({
     if (handled.current === key) return;
     handled.current = key;
 
-    // The params are consumed here, exactly as upstream's `useSearchEffect` does it —
-    // otherwise every later navigation re-runs the link. Upstream's OTHER handlers
-    // (`cameras`, `labels`, `zones`, `group`) memoise their value during render, so they
-    // still see it and still apply; those filters must be applied BEFORE the window loads
-    // (§2A.4 / F14.4), which is exactly what happens on this same commit.
+    // A link is a fresh start. Without this, a SECOND link in the same session inherits the
+    // first one's problem — which `preferResolveProblem` then refuses to replace with
+    // anything of lower rank — and inherits its dismissal, so its own notice never shows.
+    setParseProblem(undefined);
+    setResolveProblem(undefined);
+    setDismissedProblem(undefined);
+    setNavigatedStart(undefined);
+    setNav(undefined);
+
+    if (request.problems.length) setParseProblem(request.problems[0]);
+
+    // A bare `?tab=` / `?surface=` is INERT, exactly as it is upstream: `notificationTab` is
+    // only ever read by the handler that opens a recording from the same link, so a `tab`
+    // with no `id`/`t` has nothing to act on there either. It is parsed (so an invalid value
+    // is still reported rather than silently ignored) and then left alone — including the
+    // URL, because stripping the whole search string for a param we did not act on would
+    // take `?group=` and the other filter params down with it.
+    if (!request.id && request.t === undefined) return;
+
+    // The params ARE consumed once the link navigates, exactly as upstream's
+    // `useSearchEffect` does it — otherwise every later navigation re-runs the link.
+    // Upstream's OTHER handlers (`cameras`, `labels`, `zones`, `group`) memoise their value
+    // during render, so they still see it and still apply; those filters must be applied
+    // BEFORE the window loads (§2A.4 / F14.4), which is exactly what happens on this commit.
     navigate(location.pathname + location.hash, {
       state: location.state,
       replace: true,
     });
 
-    if (request.problems.length) setParseProblem(request.problems[0]);
-    // §2A.4's MUST-NOT-REGRESS table: `tab` is part of the contract on its own, not only
-    // alongside `id`. Upstream consumed `?tab=` unconditionally; handing ownership to this
-    // handler and then ignoring the bare case would silently drop it.
-    latest.current.onTab?.(request.tab);
-
     if (!request.id) {
-      if (request.t === undefined) return;
+      // Narrowed by the bare-param early return above: with no `id`, a request that reaches
+      // here has a moment.
+      const moment = request.t as number;
       if (request.view === "history") {
         const camera = latest.current.cameraForMoment;
         // No camera to open — the History scrubber is per-camera. Say so rather than
@@ -208,17 +228,20 @@ export function useContinuousDeepLink({
         if (!camera) {
           // Reachable: `cameraForMoment` falls back to the first configured camera, so this
           // is the genuinely camera-less install (or config not loaded when the link fired).
-          setResolveProblem("review-unavailable");
+          setResolveProblem((prev) =>
+            preferResolveProblem(prev, "review-unavailable"),
+          );
           return;
         }
         latest.current.openRecording({
           camera,
-          startTime: request.t,
+          startTime: moment,
           severity: "alert",
           tab: request.tab,
         });
       }
-      setNav({ t: request.t, surface: surfaceFor(request.view, request.tab) });
+      setNav({ t: moment, surface: surfaceFor(request.view, request.tab) });
+      setNavigatedStart(moment);
       return;
     }
 
@@ -237,7 +260,9 @@ export function useContinuousDeepLink({
         // code. An empty body is the only success-shaped failure left.
         const review = resp.data;
         if (!review) {
-          setResolveProblem("review-missing");
+          setResolveProblem((prev) =>
+            preferResolveProblem(prev, "review-missing"),
+          );
           return;
         }
         const startTime = review.start_time - REVIEW_PADDING;
@@ -258,7 +283,9 @@ export function useContinuousDeepLink({
           latest.current.revealOnReviewPage?.(await withReviewedFlag(review))
         ) {
           // D19: we changed what the page shows in order to reach the target — say so.
-          setResolveProblem((prev) => prev ?? "filters-adjusted");
+          setResolveProblem((prev) =>
+            preferResolveProblem(prev, "filters-adjusted"),
+          );
         }
         setNav({
           t: startTime,
@@ -269,10 +296,13 @@ export function useContinuousDeepLink({
       .catch((err) => {
         // D9: a stored link routinely points at something that is gone. 404 is the normal
         // case and gets the specific wording; anything else is "could not be loaded".
-        setResolveProblem(
-          err?.response?.status === 404
-            ? "review-missing"
-            : "review-unavailable",
+        setResolveProblem((prev) =>
+          preferResolveProblem(
+            prev,
+            err?.response?.status === 404
+              ? "review-missing"
+              : "review-unavailable",
+          ),
         );
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -288,8 +318,8 @@ export function useContinuousDeepLink({
   useEffect(() => {
     if (navigatedStart === undefined || oldestRecording === undefined) return;
     if (navigatedStart >= oldestRecording) return;
-    setResolveProblem((prev) => prev ?? "footage-expired");
+    setResolveProblem((prev) => preferResolveProblem(prev, "footage-expired"));
   }, [navigatedStart, oldestRecording]);
 
-  return { nav, tab: request?.tab ?? DEFAULT_TAB, problem, dismissProblem };
+  return { nav, problem, dismissProblem };
 }

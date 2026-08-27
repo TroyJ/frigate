@@ -150,6 +150,30 @@ export function parseDeepLink(
   return { id, t, tab, view, problems };
 }
 
+/**
+ * Which resolution problem the user is told about when more than one applies.
+ *
+ * RANKED, not first-wins. The two can genuinely co-occur — a deep link to an old alert on
+ * the Review page both relaxes the filters (D19) and lands past the recording horizon
+ * (§2A.5) — and arrival order is the axios continuation versus an SWR call, which is not a
+ * fact about what matters to the reader. §2A.5 is explicit that "older than retention" is
+ * the message that explains the blank player, so it outranks the filter note.
+ */
+const RESOLVE_RANK: Record<string, number> = {
+  "review-missing": 3,
+  "review-unavailable": 3,
+  "footage-expired": 2,
+  "filters-adjusted": 1,
+};
+
+export function preferResolveProblem(
+  prev: DeepLinkProblem | undefined,
+  next: DeepLinkProblem,
+): DeepLinkProblem {
+  if (!prev) return next;
+  return (RESOLVE_RANK[next] ?? 0) > (RESOLVE_RANK[prev] ?? 0) ? next : prev;
+}
+
 /** English strings, rendered as-is — see the note in `footage.ts` on why not via i18n. */
 export const DEEP_LINK_PROBLEM_TEXT: Record<DeepLinkProblem, string> = {
   "review-missing": "This alert no longer exists — it has been deleted.",

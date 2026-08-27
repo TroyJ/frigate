@@ -75,6 +75,8 @@ export function ContinuousDetailStream({
     onNearEnd,
     // a page can land with no items this list shows — see `windowKey`
     windowKey: ctx.pagesLoaded,
+    // a filter change discards every page without remounting us — see `resetKey`
+    resetKey: ctx.filterKey,
     gap: 16,
   });
 

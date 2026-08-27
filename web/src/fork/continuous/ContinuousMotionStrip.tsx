@@ -125,6 +125,9 @@ export function ContinuousMotionStrip({
     startAligned,
     segmentDuration,
     onNearBottom,
+    // a page arriving is the only signal left once the strip is pinned at its bottom and
+    // stops emitting scroll events — see `windowKey`
+    windowKey: ctx.pagesLoaded,
   });
 
   // heavy pages for the visible range only (§10 rule 1)

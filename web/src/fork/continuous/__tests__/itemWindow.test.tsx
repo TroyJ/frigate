@@ -41,10 +41,12 @@ function Probe({
   items,
   windowKey,
   onNearEnd,
+  resetKey,
 }: {
   items: Item[];
   windowKey: number;
   onNearEnd: () => void;
+  resetKey?: string;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   useItemWindow({
@@ -53,6 +55,7 @@ function Probe({
     estimateSize: () => 100,
     onNearEnd,
     windowKey,
+    resetKey,
   });
   return (
     <div
@@ -161,13 +164,14 @@ describe("useItemWindow re-arm", () => {
     // quiet camera would otherwise walk the shared window to the ~31-day floor on its own,
     // spending a dozen `/review` pages nobody asked for.
     let calls = 0;
-    const render = (items: Item[], windowKey: number) =>
+    const render = (items: Item[], windowKey: number, resetKey?: string) =>
       act(() => {
         root.render(
           <Probe
             items={items}
             windowKey={windowKey}
             onNearEnd={() => calls++}
+            resetKey={resetKey}
           />,
         );
       });
@@ -184,6 +188,39 @@ describe("useItemWindow re-arm", () => {
     for (let i = 0; i < MAX_EMPTY_EXTENSIONS + 2; i++) render([], 200 + i);
     expect(calls, "the budget resets once the surface has been refilled").toBe(
       afterRefill + MAX_EMPTY_EXTENSIONS,
+    );
+  });
+
+  it("a filter change restores the budget without a remount", () => {
+    // §14.4: changing cameras/labels/zones makes the provider discard every page and reset
+    // the window — WITHOUT unmounting the surface. A budget that only resets on
+    // `items.length > 0` therefore stays spent, and a grid that was empty before the filter
+    // change is dead for the rest of the session: "no alerts to review" over a window that
+    // has just been thrown away, which is the parent regression this whole rule exists for.
+    let calls = 0;
+    const render = (items: Item[], windowKey: number, resetKey: string) =>
+      act(() => {
+        root.render(
+          <Probe
+            items={items}
+            windowKey={windowKey}
+            onNearEnd={() => calls++}
+            resetKey={resetKey}
+          />,
+        );
+      });
+
+    for (let i = 0; i < MAX_EMPTY_EXTENSIONS + 3; i++)
+      render([], i + 1, "cams=");
+    expect(calls, "budget spent while empty").toBe(MAX_EMPTY_EXTENSIONS);
+
+    // the user narrows the filter: same surface, brand-new window, nothing loaded yet
+    const spent = calls;
+    for (let i = 0; i < MAX_EMPTY_EXTENSIONS; i++) {
+      render([], 100 + i, "cams=driveway");
+    }
+    expect(calls, "the new filter's window gets its own search").toBe(
+      spent + MAX_EMPTY_EXTENSIONS,
     );
   });
 });

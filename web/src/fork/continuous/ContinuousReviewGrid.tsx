@@ -176,6 +176,8 @@ export function ContinuousReviewGrid({
     onNearEnd,
     // a page can land with no items this grid shows — see `windowKey`
     windowKey: ctx.pagesLoaded,
+    // a filter change discards every page without remounting us — see `resetKey`
+    resetKey: ctx.filterKey,
   });
 
   // --- S1 ⇄ S2 coupling: which items are actually on screen (see header) --------------

@@ -45,13 +45,12 @@ import {
   retirePatches,
 } from "./store";
 import { matchesFilter } from "./filterMatch";
-import { planNavigation } from "./navigation";
+import { pagesSettled, planNavigation } from "./navigation";
 import { usePlaybackChunks } from "./usePlaybackChunks";
 import {
   DAY,
   EDGE_ALIGN,
   HOUR,
-  Page,
   alignUp,
   dayKeyToStartInTz,
   floorHourInTz,
@@ -130,6 +129,13 @@ export type ContinuousContextValue = {
   loadOlder: () => void;
   /** Count of review pages that have RESOLVED — see `useItemWindow`'s `windowKey`. */
   pagesLoaded: number;
+  /**
+   * Identity of the active server-side filter (cameras/labels/zones). It changes exactly
+   * when the provider discards every loaded page (§14.4), which surfaces need to know
+   * because some of their own state is only valid for one filter — see `useItemWindow`'s
+   * `resetKey`.
+   */
+  filterKey: string;
   ensureLoaded: (t: number) => Promise<void>;
   reviews: ReviewSegment[];
   reviewsByCamera: Map<string, ReviewSegment[]>;
@@ -231,17 +237,17 @@ const NAV_RETRY_MS = 250;
 /** Trailing debounce for the calendar's follow-the-surface day (see `reportViewTime`). */
 const CALENDAR_FOLLOW_MS = 400;
 /**
- * `ensureLoaded`'s poll budget, deliberately sized UNDER `NAV_SETTLE_MS`.
- *
- * A wait that outlives the navigation it is for is not a safety net, it is a stall: the user
- * clicked a day and nothing happens while a loop counts. The navigation is bounded at
- * `NAV_SETTLE_MS`, so paging gets a little less than that and then the surface scrolls
- * against whatever loaded (§2A.5 — a stated outcome beats a spinner).
+ * How often `ensureLoaded` re-asks whether the span is covered. It does NOT get a budget of
+ * its own: it shares the navigation's single `NAV_SETTLE_MS` deadline, so paging and the
+ * settle cannot add up to twice the number written in the code.
  */
 const ENSURE_LOADED_POLL_MS = 50;
-const ENSURE_LOADED_TRIES = Math.floor(
-  (NAV_SETTLE_MS * 0.75) / ENSURE_LOADED_POLL_MS,
-);
+/**
+ * How long an unnamed (broadcast) navigation is replayed into surfaces that mount after it.
+ * One page's surfaces mount within a commit or two of each other; a second is generous and
+ * still far short of anything a user would experience as the view moving on its own.
+ */
+const BROADCAST_REPLAY_MS = 1_000;
 
 type Props = {
   filter: ContinuousFilter;
@@ -473,8 +479,8 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
   }, [floor, tz]);
 
   /**
-   * §2A.3 step 1 — extend the window backwards until `t` is loaded, and WAIT for the whole
-   * span, not merely for the page that contains `t`.
+   * §2A.3 step 1 — extend the window backwards until `t` is loaded, and wait for the whole
+   * SPAN, not merely for the page that contains `t`.
    *
    * The distinction is the difference between a day-jump working and landing two days out.
    * Pages resolve out of order (the queue runs two at a time), and `mergeReviews` keeps the
@@ -484,34 +490,27 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
    * alert) and scrolled to exactly its row — and then the two intermediate pages landed,
    * inserted ~1000 items above it, and left the viewport on a day two days newer. The
    * scroll was right; the list moved under it.
+   *
+   * "Loaded" is decided by RANGE COVERAGE (`pagesSettled`), never by page keys. Keys belong
+   * to a lattice, and the lattice moves under this loop: `pageHours` flips 72 → 24 the first
+   * time a page is slow, which a deep jump is exactly what causes. See `pagesSettled` for
+   * both failure modes that produced — waiting for pages nobody will request, and waiting
+   * for a key the abort path deleted.
+   *
+   * It shares ONE deadline with the navigation it belongs to, rather than spending its own
+   * budget first: the user clicked a day, and paging that outlives the navigation is not a
+   * safety net, it is a stall.
    */
   const newestRef = useRef(newest);
   newestRef.current = newest;
   const ensureLoaded = useCallback(
-    async (t: number) => {
+    async (t: number, deadline: number = Date.now() + NAV_SETTLE_MS) => {
       const target = Math.max(floor, floorHourInTz(t - HOUR, tz));
       setOldest((prev) => Math.min(prev, target));
-      // RE-COMPUTED every poll, against the CURRENT page tier. `pageHours` flips 72 → 24 the
-      // first time a page takes longer than SLOW_PAGE_MS — and a deep jump is exactly what
-      // trips that — which re-lattices every key through `snapToSpanGrid`. A `wanted` list
-      // captured once before the flip then names pages that will never be requested under
-      // the new tier, and the loop waits out its entire budget for keys that cannot arrive.
-      const stillWanted = () =>
-        pagesFor(target, newestRef.current, pageHours.current, tz);
-      // "Absent" is only unsettled while the page is still one this window wants: the abort
-      // path DELETES a page (see `fetchPage`), so an absent key that is no longer on the
-      // lattice is finished business, not something to wait for.
-      const settled = (after: number, wanted: Page[]) => {
-        const p = pagesRef.current.get(after);
-        if (p) return p.status !== "loading" && p.status !== "queued";
-        return !wanted.some((w) => w.after === after);
-      };
-      // Bounded, because a page can fail: the navigation still has to happen, against
-      // whatever did load, rather than being dropped in silence (§2A.5). The budget sits
-      // just under NAV_SETTLE_MS so a stall cannot outlive the navigation it is for.
-      for (let i = 0; i < ENSURE_LOADED_TRIES; i++) {
-        const wanted = stillWanted();
-        if (!wanted.length || wanted.every((p) => settled(p.after, wanted))) {
+      while (Date.now() < deadline) {
+        if (
+          pagesSettled(target, newestRef.current, pagesRef.current.values())
+        ) {
           return;
         }
         await new Promise((r) => setTimeout(r, ENSURE_LOADED_POLL_MS));
@@ -679,6 +678,12 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
   const surfaces = useRef(new Map<SurfaceName, SurfaceApi>());
   const activeSurface = useRef<SurfaceName>("timeline");
   const pendingNav = useRef<{ t: number; opts?: NavigateOptions }>();
+  /** The last unnamed (broadcast) navigation, replayed to late-mounting surfaces — see below. */
+  const lastBroadcast = useRef<{
+    t: number;
+    opts?: NavigateOptions;
+    until: number;
+  }>();
   const [selectedId, setSelectedId] = useState<string>();
   const seekRef = useRef<(t: number) => void>();
 
@@ -694,15 +699,18 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
     opts?: NavigateOptions;
     deadline: number;
   }>();
-  const issueNav = useCallback((t: number, opts?: NavigateOptions) => {
-    navSeq.current += 1;
-    setNavRequest({
-      seq: navSeq.current,
-      t,
-      opts,
-      deadline: Date.now() + NAV_SETTLE_MS,
-    });
-  }, []);
+  const issueNav = useCallback(
+    (t: number, opts?: NavigateOptions, deadline?: number) => {
+      navSeq.current += 1;
+      setNavRequest({
+        seq: navSeq.current,
+        t,
+        opts,
+        deadline: deadline ?? Date.now() + NAV_SETTLE_MS,
+      });
+    },
+    [],
+  );
 
   const registerSurface = useCallback(
     (name: SurfaceName, api: SurfaceApi) => {
@@ -720,6 +728,16 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
           // it is re-issued and the effect below fans it out after this commit, by which
           // time the page's other surfaces have registered too.
           issueNav(nav.t, nav.opts);
+        }
+      } else {
+        // A surface that mounts a beat AFTER an unnamed fan-out — the Review strip lands one
+        // commit behind the grid on a cold load — would otherwise be the one left showing a
+        // different day. The fan-out is remembered briefly and replayed into whoever turns
+        // up during that window. Bounded in time rather than by a surface census, because
+        // the provider does not know which surfaces a page intends to mount.
+        const recent = lastBroadcast.current;
+        if (recent && Date.now() < recent.until) {
+          api.scrollToTime(recent.t, scrollOptsFor(recent.opts));
         }
       }
       return () => {
@@ -767,12 +785,16 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
   // Every mounted surface, not just the "active" one: the Review page has a grid AND a
   // strip on screen together, `activeSurface` is just whichever registered last, and "go to
   // now" means both of them. Sending it to one leaves the other pointing at history.
+  // `newest` from a REF, so this callback is stable for the provider's life. It ticks with
+  // the tail (≤60 s), and with it in the deps the narrow calendar context re-identified once
+  // a minute — which is exactly the churn that context exists to keep away from two upstream
+  // components.
   const scrollToTop = useCallback(() => {
     for (const api of surfaces.current.values()) {
       if (api.scrollToTop) api.scrollToTop();
-      else api.scrollToTime(newest);
+      else api.scrollToTime(newestRef.current);
     }
-  }, [newest]);
+  }, []);
 
   /**
    * §2A.3 / D11 — THE navigation primitive. The calendar day-jump, a strip segment click and
@@ -795,8 +817,12 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
     async (t: number, opts?: NavigateOptions) => {
       if (!Number.isFinite(t)) return;
       if (opts?.selectId) setSelectedId(opts.selectId);
-      await ensureLoaded(t);
-      issueNav(t, opts);
+      // ONE deadline for the whole navigation, shared with paging. Sequential budgets
+      // (paging, and only then the settle) add up to a navigation that can take twice as
+      // long as either number in the code suggests.
+      const deadline = Date.now() + NAV_SETTLE_MS;
+      await ensureLoaded(t, deadline);
+      issueNav(t, opts, deadline);
     },
     [ensureLoaded, issueNav],
   );
@@ -839,6 +865,13 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
         NAV_RETRY_MS,
       );
       return () => clearTimeout(timer);
+    }
+    if (!named) {
+      lastBroadcast.current = {
+        t: req.t,
+        opts: req.opts,
+        until: Date.now() + BROADCAST_REPLAY_MS,
+      };
     }
     for (const api of targets) api.scrollToTime(req.t, scrollOptsFor(req.opts));
     // D15: History registered a seeker, the Review page did not — see `registerSeek`.
@@ -884,6 +917,7 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
       isLoadingOlder,
       loadOlder,
       pagesLoaded,
+      filterKey,
       ensureLoaded,
       reviews,
       reviewsByCamera,
@@ -917,6 +951,7 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
       isLoadingOlder,
       loadOlder,
       pagesLoaded,
+      filterKey,
       ensureLoaded,
       reviews,
       reviewsByCamera,
