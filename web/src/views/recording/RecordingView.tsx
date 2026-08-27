@@ -454,6 +454,22 @@ export function RecordingView({
     [currentTimeRange, updateSelectedSegment],
   );
 
+  // fork (D15): in History a navigation also SEEKS — a calendar day-jump moves the strip and
+  // the player together, as the two have always been coupled here. The Review page has no
+  // player and registers nothing, which is the other half of D15. `manuallySetCurrentTime`
+  // rather than `setCurrentTime`, because it latches the deep-seek intent synchronously with
+  // the gesture (see `forkSeekTarget`) — a day-jump is exactly the out-of-window seek that
+  // race was about. `play = false`: jumping to a day should not start playback.
+  const continuousRegisterSeek = continuous.enabled
+    ? continuous.registerSeek
+    : undefined;
+  useEffect(() => {
+    if (!continuousRegisterSeek) return;
+    return continuousRegisterSeek((t: number) =>
+      manuallySetCurrentTime(t, false),
+    );
+  }, [continuousRegisterSeek, manuallySetCurrentTime]);
+
   // fork (Q3=A / §14.3): seeking into a region the chunk window does not cover yet.
   // `updateSelectedSegment` resolves the playhead by `findIndex` over `chunkedTimeRange`
   // and, on -1, silently drops the seek. That was unreachable while the fork handed over

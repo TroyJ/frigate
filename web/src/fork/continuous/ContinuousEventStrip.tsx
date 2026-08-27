@@ -43,7 +43,8 @@ import { EventSegment } from "./cells/EventSegment";
 import { useContinuousStrict } from "./ContinuousProvider";
 import { useSegmentEventIndex } from "./useSegmentEventIndex";
 import { SEGMENT_HEIGHT, useFixedPitchWindow } from "./useFixedPitchWindow";
-import { alignDown, startOfDayInTz } from "./timeAlign";
+import { alignDown } from "./timeAlign";
+import { denseStripTarget } from "./navigation";
 
 export type ContinuousEventStripProps = {
   events: ReviewSegment[];
@@ -212,16 +213,19 @@ export function ContinuousEventStrip({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleTimestamps, showMinimap, segmentDuration]);
 
-  // navigation registry (§2A.3 / D14): dense strips jump to the day's OLDEST edge —
-  // 00:00 box time — placed at the top of the viewport, so the user scrolls up through it.
+  // navigation registry (§2A.3 / D14): a dense strip lands a DAY-jump on the day's OLDEST
+  // edge — 00:00 box time — placed at the top of the viewport, so the user scrolls up
+  // through the day. A MOMENT (a deep link, a segment click) lands on the moment itself:
+  // sending it to midnight instead would put a 03:14 alert three hours off screen, which
+  // is the whole failure D11 is about.
   useEffect(
     () =>
       ctx.registerSurface("strip", {
         scrollToTop: () => win.scrollToIndex(0, { align: "start" }),
-        scrollToTime: (t) => {
-          const dayStart = startOfDayInTz(t, ctx.tz);
+        scrollToTime: (t, opts) => {
+          const target = denseStripTarget(t, opts?.intent, ctx.tz);
           const index = Math.round(
-            (startAligned - alignDown(dayStart, segmentDuration)) /
+            (startAligned - alignDown(target, segmentDuration)) /
               segmentDuration,
           );
           win.scrollToIndex(Math.max(0, Math.min(count - 1, index)), {

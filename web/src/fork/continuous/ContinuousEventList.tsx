@@ -54,8 +54,8 @@ export function ContinuousEventList({
     () =>
       ctx.registerSurface("events", {
         scrollToTop: () => win.scrollToIndex(0, { align: "start" }),
-        scrollToTime: (t, selectId) => {
-          if (selectId && win.scrollToId(selectId)) return;
+        scrollToTime: (t, opts) => {
+          if (opts?.selectId && win.scrollToId(opts.selectId)) return;
           // one primitive for both callers (see dayNav.ts): a segment click passes the
           // moment, a calendar day-jump passes 00:00 box time and gets D14's "the day's
           // earliest review" from the same scan.

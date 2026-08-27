@@ -45,6 +45,7 @@ import {
   retirePatches,
 } from "./store";
 import { matchesFilter } from "./filterMatch";
+import { planNavigation } from "./navigation";
 import { usePlaybackChunks } from "./usePlaybackChunks";
 import {
   DAY,
@@ -54,6 +55,7 @@ import {
   dayKeyToStartInTz,
   floorHourInTz,
   pagesFor,
+  startOfDayInTz,
 } from "./timeAlign";
 
 export type SurfaceName =
@@ -64,14 +66,51 @@ export type SurfaceName =
   | "strip"
   | "motion";
 
+/**
+ * WHY a navigation is happening, because D14 makes the answer differ per surface.
+ *
+ *  - `moment` — a deep link, or a click on a specific review: put THAT instant in view.
+ *  - `day` — a calendar pick: sparse surfaces (S1/S5/S6) land on the day's EARLIEST item,
+ *    dense strips (S2/S3/S4) put 00:00 box time at the TOP of the viewport so the user
+ *    scrolls up through the day.
+ *
+ * Collapsing the two — which is what a bare `scrollToTime(t)` did — means a deep link to a
+ * 03:14 alert scrolls the strip to that day's midnight instead of to the alert.
+ */
+export type NavIntent = "moment" | "day";
+
+export type ScrollToTimeOptions = {
+  /** Select this item if the surface can find it; otherwise fall back to the time. */
+  selectId?: string;
+  intent?: NavIntent;
+};
+
 export type SurfaceApi = {
-  /** Scroll so `t` is in view; select `selectId` if given. */
-  scrollToTime: (t: number, selectId?: string) => void;
+  /** Scroll so `t` is in view, per `opts.intent` (D14). */
+  scrollToTime: (t: number, opts?: ScrollToTimeOptions) => void;
   /** Jump to the newest edge. Used by the "N new" chip (§9.3, D17). */
   scrollToTop?: () => void;
 };
 
-export type NavigateOptions = { surface?: SurfaceName; selectId?: string };
+export type NavigateOptions = {
+  surface?: SurfaceName;
+  selectId?: string;
+  intent?: NavIntent;
+  /**
+   * D15: in History a day-jump also seeks the player; on the Review page there is no
+   * player, so it scrolls only. That falls out of WHO REGISTERED A SEEKER rather than out
+   * of a flag — `RecordingView` registers one, `EventView` does not — so the default is
+   * "seek if anything can". Pass `false` for a navigation that must never move playback.
+   */
+  seek?: boolean;
+};
+
+/** A navigation asked for from outside the provider (the `?id=`/`?t=` deep link, §2A.3). */
+export type DeepLinkNav = {
+  t: number;
+  selectId?: string;
+  surface?: SurfaceName;
+};
 
 export type ContinuousFilter = {
   cameras?: string;
@@ -117,7 +156,21 @@ export type ContinuousContextValue = {
   /** Jump the active surface to the newest edge. */
   scrollToTop: () => void;
   registerSurface: (name: SurfaceName, api: SurfaceApi) => () => void;
+  /**
+   * D15: how the player is moved when a navigation asks for it. Registered by
+   * `RecordingView` only — the Review page has no player, so nothing registers there and
+   * `navigateToTime` scrolls without seeking, which is exactly what D15 asks for.
+   */
+  registerSeek: (fn: (t: number) => void) => () => void;
   navigateToTime: (t: number, opts?: NavigateOptions) => Promise<void>;
+  /**
+   * The day (00:00 in `tz`) the active surface is looking at, or undefined while it is on
+   * today — D1's calendar-as-navigator: the calendar FOLLOWS the surface instead of
+   * filtering it. Fed by `reportViewTime`.
+   */
+  calendarDay?: number;
+  /** Tell the provider which moment the active surface is showing (calendar follow). */
+  reportViewTime: (t: number) => void;
   selectedId?: string;
   setSelectedId: (id?: string) => void;
   /** Number of items that arrived at the head while the user was not at the top. */
@@ -138,13 +191,27 @@ const REVIEW_PAGE_HOURS_FAST = 72;
 const REVIEW_PAGE_HOURS_SLOW = 24;
 const SLOW_PAGE_MS = 1500;
 const RETENTION_FALLBACK_DAYS = 366;
+/**
+ * How long a navigation may wait for the page carrying its target item before it gives up
+ * and scrolls to the TIME instead. Deliberately generous: `ensureLoaded` has already waited
+ * for the page containing `t`, so this only covers the commit that renders it plus the case
+ * where the item never arrives at all (deleted, or excluded by the active filter — D19).
+ */
+const NAV_SETTLE_MS = 8_000;
+const NAV_RETRY_MS = 250;
+/** Trailing debounce for the calendar's follow-the-surface day (see `reportViewTime`). */
+const CALENDAR_FOLLOW_MS = 400;
+/** 50 ms apart — 30 s, which has to cover every page between the target and now. */
+const ENSURE_LOADED_TRIES = 600;
 
 type Props = {
   filter: ContinuousFilter;
+  /** A deep link to run once (§2A.3 / D11) — see the effect that consumes it. */
+  initialNav?: DeepLinkNav;
   children: ReactNode;
 };
 
-export function ContinuousProvider({ filter, children }: Props) {
+export function ContinuousProvider({ filter, initialNav, children }: Props) {
   const [enabled, setEnabled, toggleLoaded] = useContinuousEnabled();
   const { data: config } = useSWR<FrigateConfig>("config");
   const tz =
@@ -366,16 +433,35 @@ export function ContinuousProvider({ filter, children }: Props) {
     });
   }, [floor, tz]);
 
+  /**
+   * §2A.3 step 1 — extend the window backwards until `t` is loaded, and WAIT for the whole
+   * span, not merely for the page that contains `t`.
+   *
+   * The distinction is the difference between a day-jump working and landing two days out.
+   * Pages resolve out of order (the queue runs two at a time), and `mergeReviews` keeps the
+   * list sorted, so a page that lands AFTER the scroll inserts its items in the MIDDLE and
+   * pushes the target down by however many it carried. Measured on a jump 9.5 days back:
+   * the deep page landed first, the grid resolved the right index (1792, the day's 06:03
+   * alert) and scrolled to exactly its row — and then the two intermediate pages landed,
+   * inserted ~1000 items above it, and left the viewport on a day two days newer. The
+   * scroll was right; the list moved under it.
+   */
+  const newestRef = useRef(newest);
+  newestRef.current = newest;
   const ensureLoaded = useCallback(
     async (t: number) => {
       const target = Math.max(floor, floorHourInTz(t - HOUR, tz));
       setOldest((prev) => Math.min(prev, target));
-      // wait for the page containing t to land
-      const [page] = pagesFor(t, t + 1, pageHours.current, tz);
-      if (!page) return;
-      for (let i = 0; i < 200; i++) {
-        const p = pagesRef.current.get(page.after);
-        if (p && p.status !== "loading" && p.status !== "queued") return;
+      const wanted = pagesFor(target, newestRef.current, pageHours.current, tz);
+      if (!wanted.length) return;
+      const settled = (after: number) => {
+        const p = pagesRef.current.get(after);
+        return !!p && p.status !== "loading" && p.status !== "queued";
+      };
+      // Bounded, because a page can fail: the navigation still has to happen, against
+      // whatever did load, rather than being dropped in silence (§2A.5).
+      for (let i = 0; i < ENSURE_LOADED_TRIES; i++) {
+        if (wanted.every((p) => settled(p.after))) return;
         await new Promise((r) => setTimeout(r, 50));
       }
     },
@@ -542,6 +628,12 @@ export function ContinuousProvider({ filter, children }: Props) {
   const activeSurface = useRef<SurfaceName>("timeline");
   const pendingNav = useRef<{ t: number; opts?: NavigateOptions }>();
   const [selectedId, setSelectedId] = useState<string>();
+  const seekRef = useRef<(t: number) => void>();
+
+  const scrollOptsFor = (opts?: NavigateOptions): ScrollToTimeOptions => ({
+    selectId: opts?.selectId,
+    intent: opts?.intent ?? "moment",
+  });
 
   const registerSurface = useCallback((name: SurfaceName, api: SurfaceApi) => {
     surfaces.current.set(name, api);
@@ -549,12 +641,47 @@ export function ContinuousProvider({ filter, children }: Props) {
     const nav = pendingNav.current;
     if (nav && (!nav.opts?.surface || nav.opts.surface === name)) {
       pendingNav.current = undefined;
-      api.scrollToTime(nav.t, nav.opts?.selectId);
+      api.scrollToTime(nav.t, scrollOptsFor(nav.opts));
     }
     return () => {
       surfaces.current.delete(name);
     };
   }, []);
+
+  const registerSeek = useCallback((fn: (t: number) => void) => {
+    seekRef.current = fn;
+    return () => {
+      if (seekRef.current === fn) seekRef.current = undefined;
+    };
+  }, []);
+
+  // Calendar follow (D1): the day the user is LOOKING at, not a filter. Kept at day
+  // granularity deliberately — surfaces report on every scroll frame and on every playhead
+  // tick, and provider state that changed at that rate would re-render every surface four
+  // times a second for a label.
+  const [calendarDay, setCalendarDay] = useState<number>();
+  const calendarTimer = useRef<ReturnType<typeof setTimeout>>();
+  const reportViewTime = useCallback(
+    (t: number) => {
+      if (!Number.isFinite(t) || t <= 0) return;
+      const day = startOfDayInTz(t, tz);
+      const today = startOfDayInTz(Date.now() / 1000, tz);
+      // On today the calendar reads "Last 24 hours", as it does upstream at rest.
+      const next = day >= today ? undefined : day;
+      // TRAILING, not immediate. Day granularity alone is not enough: a scroll to the review
+      // floor crosses ~31 day boundaries, and a provider state change re-renders every
+      // mounted surface, so the unthrottled version put ~31 extra reflows into exactly the
+      // scroll during which the other gates are trying to click a card. A calendar label is
+      // never worth a reflow mid-gesture.
+      clearTimeout(calendarTimer.current);
+      calendarTimer.current = setTimeout(
+        () => setCalendarDay((prev) => (prev === next ? prev : next)),
+        CALENDAR_FOLLOW_MS,
+      );
+    },
+    [tz],
+  );
+  useEffect(() => () => clearTimeout(calendarTimer.current), []);
 
   // Every mounted surface, not just the "active" one: the Review page has a grid AND a
   // strip on screen together, `activeSurface` is just whichever registered last, and "go to
@@ -566,17 +693,116 @@ export function ContinuousProvider({ filter, children }: Props) {
     }
   }, [newest]);
 
+  /**
+   * §2A.3 / D11 — THE navigation primitive. The calendar day-jump, a strip segment click and
+   * the alert deep-link are all callers of this one function; built separately they diverge,
+   * which is the failure §2A.3 was written to prevent.
+   *
+   *   1. extend the window backwards until `t` is loaded   (`ensureLoaded`, §10 paging)
+   *   2. hand the request to the surface, AFTER the commit that carries the new page
+   *   3. select `selectId` so the item is visibly highlighted
+   *   4. seek the player, if one registered (D15 — History yes, Review page no)
+   *
+   * Step 2 is why this is a state transition and not a straight call. `ensureLoaded`
+   * resolves when the PAGE has landed in provider state; the surface that has to scroll is
+   * a child that has not re-rendered yet, and the `scrollToTime` closure sitting in the
+   * registry still sees the old `items` array. Calling it there scrolls to a stale index —
+   * for a deep link, reliably the wrong card. The request is parked instead and performed by
+   * an effect, which by definition runs after the commit that carries the page.
+   */
+  const navSeq = useRef(0);
+  const [navRequest, setNavRequest] = useState<{
+    seq: number;
+    t: number;
+    opts?: NavigateOptions;
+    deadline: number;
+  }>();
+
   const navigateToTime = useCallback(
     async (t: number, opts?: NavigateOptions) => {
-      await ensureLoaded(t);
+      if (!Number.isFinite(t)) return;
       if (opts?.selectId) setSelectedId(opts.selectId);
-      const name = opts?.surface ?? activeSurface.current;
-      const api = surfaces.current.get(name);
-      if (api) api.scrollToTime(t, opts?.selectId);
-      else pendingNav.current = { t, opts };
+      await ensureLoaded(t);
+      navSeq.current += 1;
+      setNavRequest({
+        seq: navSeq.current,
+        t,
+        opts,
+        deadline: Date.now() + NAV_SETTLE_MS,
+      });
     },
     [ensureLoaded],
   );
+
+  useEffect(() => {
+    const req = navRequest;
+    if (!req) return;
+    // A named surface goes to that surface; an UNNAMED one goes to every mounted surface,
+    // for the same reason `scrollToTop` does — the Review page has a grid AND a strip on
+    // screen at once, and a calendar day-jump that moved only whichever registered last
+    // would leave the other pointing at a different day. A deep link and a strip click both
+    // name their target, so they are unaffected.
+    const named = req.opts?.surface;
+    const targets = named
+      ? [surfaces.current.get(named)].filter((a): a is SurfaceApi => !!a)
+      : [...surfaces.current.values()];
+    // `reviews` is in the deps, so a page ARRIVAL re-runs this; the timer below covers the
+    // case where no further page arrives and the request must still be honoured against the
+    // time rather than dropped in silence. See `planNavigation`.
+    const step = planNavigation({
+      hasSurface: targets.length > 0,
+      selectId: req.opts?.selectId,
+      itemLoaded: reviews.some((r) => r.id === req.opts?.selectId),
+      now: Date.now(),
+      deadline: req.deadline,
+    });
+    if (step === "defer") {
+      // The surface has not mounted yet — a `?surface=history` deep link navigates before
+      // `RecordingView` exists. `registerSurface` replays it on mount.
+      pendingNav.current = { t: req.t, opts: req.opts };
+      setNavRequest(undefined);
+      return;
+    }
+    if (step === "wait") {
+      // eslint-disable-next-line no-console
+      console.log("FORKNAV wait", Date.now(), req.seq);
+      const timer = setTimeout(
+        () =>
+          setNavRequest((cur) =>
+            cur && cur.seq === req.seq ? { ...cur } : cur,
+          ),
+        NAV_RETRY_MS,
+      );
+      return () => clearTimeout(timer);
+    }
+    // eslint-disable-next-line no-console
+    console.log("FORKNAV go", Date.now(), JSON.stringify({t: req.t, step, targets: targets.length}));
+    for (const api of targets) api.scrollToTime(req.t, scrollOptsFor(req.opts));
+    // D15: History registered a seeker, the Review page did not — see `registerSeek`.
+    if (req.opts?.seek !== false) seekRef.current?.(req.t);
+    setNavRequest(undefined);
+  }, [navRequest, reviews]);
+
+  /**
+   * The deep link (§2A.3). It arrives as a prop because `pages/Events.tsx` — which owns the
+   * search params — sits ABOVE this provider, and because the provider is remounted when
+   * the page switches between the Review grid and the History scrubber. Running it from an
+   * effect keyed on the object's identity means the navigation survives that remount and
+   * happens exactly once per link.
+   */
+  const lastInitialNav = useRef<DeepLinkNav>();
+  useEffect(() => {
+    if (!initialNav || lastInitialNav.current === initialNav) return;
+    lastInitialNav.current = initialNav;
+    navigateToTime(initialNav.t, {
+      surface: initialNav.surface,
+      selectId: initialNav.selectId,
+      intent: "moment",
+      // The deep link opens the player at the moment itself (`setRecording` already did
+      // that); seeking again from here would fight the mount.
+      seek: false,
+    });
+  }, [initialNav, navigateToTime]);
 
   // console escape hatch for bring-up: frigateContinuous(false)
   useEffect(() => {
@@ -607,7 +833,10 @@ export function ContinuousProvider({ filter, children }: Props) {
       forgetSurface,
       scrollToTop,
       registerSurface,
+      registerSeek,
       navigateToTime,
+      calendarDay,
+      reportViewTime,
       selectedId,
       setSelectedId,
       pendingNew,
@@ -637,7 +866,10 @@ export function ContinuousProvider({ filter, children }: Props) {
       forgetSurface,
       scrollToTop,
       registerSurface,
+      registerSeek,
       navigateToTime,
+      calendarDay,
+      reportViewTime,
       selectedId,
       pendingNew,
       extent,
