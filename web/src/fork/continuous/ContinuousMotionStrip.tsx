@@ -202,9 +202,9 @@ export function ContinuousMotionStrip({
 
   // Two effects, not one. Reporting happens whenever `stickToTop` flips; RETIRING the
   // surface happens only on unmount (a Review tab switch), because a stale `false` left in
-  // the map latches the "N new" chip on forever (§9.3). Returning the disposer from the
-  // reporting effect would also forget-and-re-report on every flip — two extra provider
-  // renders for nothing.
+  // the map latches the "N new" chip on forever (§9.3). Folding the retire into the
+  // reporting effect's cleanup would forget-and-re-report on every flip — two extra
+  // provider renders for nothing.
   const reportAtTop = ctx.reportAtTop;
   const forgetSurface = ctx.forgetSurface;
   useEffect(() => {

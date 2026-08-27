@@ -84,6 +84,14 @@ import {
 } from "@/components/overlay/chip/GenAISummaryChip";
 
 const DATA_REFRESH_TIME = 600000; // 10 minutes
+/**
+ * fork (Phase 6): how long a deep seek may own `currentTime` before the player's clock
+ * takes it back. Generous — the slowest deep seek measured here took 6.6 s from click to
+ * the target hour's playlist, under a 20x CPU throttle against the dev proxy — but finite,
+ * so a seek that can never land (a gap with no footage in the target hour) cannot freeze
+ * the handlebar. It has NOT been measured through HA ingress + Cloudflare (L3).
+ */
+const FORK_SEEK_LANDING_MS = 15_000;
 
 type RecordingViewProps = {
   startCamera: string;
@@ -344,8 +352,15 @@ export function RecordingView({
    * "Landed" is a reported timestamp inside the target's HOUR: that is the granularity the
    * chunk window works in, and a seek legitimately arrives some seconds off the exact
    * moment when the hour has gaps (`calculateSeekPosition` moves it to real footage).
+   *
+   * Time-boxed, because "landed" is defined by something the player has to DO. Seek into a
+   * gap deep in the retained range and the hour may produce no timestamp in that hour at
+   * all — `setNoRecording` instead — and without the deadline `currentTime` would stay
+   * suppressed until the next gesture. After FORK_SEEK_LANDING_MS the player's clock gets
+   * its state back; the seek either worked or it did not, and pretending otherwise costs a
+   * frozen handlebar.
    */
-  const forkSeekLanding = useRef<number>();
+  const forkSeekLanding = useRef<{ target: number; at: number }>();
 
   /**
    * fork (Phase 6): the setter the continuous panel gets for handlebar moves.
@@ -369,7 +384,7 @@ export function RecordingView({
       const range = currentTimeRangeRef.current;
       if (!range || range.after > value || range.before < value) {
         forkSeekTarget.current = value;
-        forkSeekLanding.current = value;
+        forkSeekLanding.current = { target: value, at: Date.now() };
       }
     }
     setCurrentTime(value);
@@ -426,7 +441,7 @@ export function RecordingView({
       if (currentTimeRange.after > time || currentTimeRange.before < time) {
         // fork: latch the intent HERE, synchronously with the gesture — see `forkSeekTarget`
         forkSeekTarget.current = time;
-        forkSeekLanding.current = time;
+        forkSeekLanding.current = { target: time, at: Date.now() };
       }
       setCurrentTime(time);
 
@@ -965,7 +980,10 @@ export function RecordingView({
                       ? forkSeekLanding.current
                       : undefined;
                     if (landing !== undefined) {
-                      if (!sameHour(timestamp, landing)) return;
+                      const landed = sameHour(timestamp, landing.target);
+                      const expired =
+                        Date.now() - landing.at > FORK_SEEK_LANDING_MS;
+                      if (!landed && !expired) return;
                       forkSeekLanding.current = undefined;
                     }
                     setCurrentTime(timestamp);

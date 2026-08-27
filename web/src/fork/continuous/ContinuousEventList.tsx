@@ -45,6 +45,8 @@ export function ContinuousEventList({
     items: list,
     estimateSize: estimate,
     onNearEnd,
+    // a page can land with no items this list shows — see `windowKey`
+    windowKey: ctx.pagesLoaded,
     lanes: isMobile ? 2 : 1,
   });
 

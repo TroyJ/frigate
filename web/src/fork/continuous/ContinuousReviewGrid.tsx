@@ -174,6 +174,8 @@ export function ContinuousReviewGrid({
     estimateSize: estimate,
     gap: GAP,
     onNearEnd,
+    // a page can land with no items this grid shows — see `windowKey`
+    windowKey: ctx.pagesLoaded,
   });
 
   // --- S1 ⇄ S2 coupling: which items are actually on screen (see header) --------------

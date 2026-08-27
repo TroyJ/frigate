@@ -88,6 +88,8 @@ export type ContinuousContextValue = {
   hasMore: boolean;
   isLoadingOlder: boolean;
   loadOlder: () => void;
+  /** Count of review pages that have RESOLVED — see `useItemWindow`'s `windowKey`. */
+  pagesLoaded: number;
   ensureLoaded: (t: number) => Promise<void>;
   reviews: ReviewSegment[];
   reviewsByCamera: Map<string, ReviewSegment[]>;
@@ -101,9 +103,10 @@ export type ContinuousContextValue = {
   reportPlayhead: (t: number) => void;
   /**
    * Tell the provider whether the active surface is pinned to the newest edge (§9.3).
-   * Returns a disposer the caller MUST use as its effect cleanup — see `forgetSurface`.
+   * Call it as often as the answer changes; it is a no-op when the value is unchanged.
+   * RETIRING the surface is a separate call — `forgetSurface` — made only on unmount.
    */
-  reportAtTop: (surface: SurfaceName, atTop: boolean) => () => void;
+  reportAtTop: (surface: SurfaceName, atTop: boolean) => void;
   /**
    * Drop a surface's entry entirely, for when it unmounts (§9.3).
    *
@@ -328,6 +331,20 @@ export function ContinuousProvider({ filter, children }: Props) {
     () => [...pages.values()].filter((p) => p.status === "loading").length,
     [pages],
   );
+  /**
+   * How many review pages have RESOLVED. Surfaces use it to re-arm their load-more check
+   * (`useItemWindow`'s `windowKey`), because a page can land carrying nothing they display.
+   *
+   * It counts ARRIVALS, deliberately, and not `oldest`: keying the re-arm on the window
+   * edge feeds `loadOlder`'s own output straight back into its trigger, and the window
+   * chains as fast as the in-flight cap allows. Measured when it was tried that way — eight
+   * pages requested at mount with nobody scrolling, `[24, 34.9, 106.9, 178.9, 250.9, 322.9,
+   * 394.9]` — which is the same runaway the pixel-distance rule was written to stop.
+   */
+  const pagesLoaded = useMemo(
+    () => [...pages.values()].filter((p) => p.status === "done").length,
+    [pages],
+  );
   const isLoadingOlder = loadingCount > 0;
   // Bounded lookahead, NOT a hard "any page loading" freeze (which let one slow/stuck
   // page halt the whole window — the ~31-day plateau). `/review` pages are cheap and the
@@ -377,11 +394,15 @@ export function ContinuousProvider({ filter, children }: Props) {
   const [atTopBySurface, setAtTopBySurface] = useState<
     Partial<Record<SurfaceName, boolean>>
   >({});
-  // The entry must also be REMOVED when the surface unmounts, which is why `reportAtTop`
-  // hands back a disposer. The Review tabs are mutually exclusive mounts under one
-  // provider, so an ordinary tab switch retires a surface: leaving its last `false` behind
-  // held `allAtTop` off for the rest of the session, and the chip then appeared on every
-  // arrival while the user sat pinned at now, with nothing able to clear it.
+  // The entry must also be REMOVED when the surface unmounts, which is what `forgetSurface`
+  // is for. The Review tabs are mutually exclusive mounts under one provider, so an ordinary
+  // tab switch retires a surface: leaving its last `false` behind held `allAtTop` off for
+  // the rest of the session, and the chip then appeared on every arrival while the user sat
+  // pinned at now, with nothing able to clear it.
+  //
+  // It is deliberately NOT a disposer returned from `reportAtTop`: reporting happens on
+  // every scroll-state flip, retiring happens once, and tying them together made every flip
+  // a forget + re-report — two provider state updates for nothing.
   const forgetSurface = useCallback((surface: SurfaceName) => {
     setAtTopBySurface((prev) => {
       if (!(surface in prev)) return prev;
@@ -390,15 +411,11 @@ export function ContinuousProvider({ filter, children }: Props) {
       return next;
     });
   }, []);
-  const reportAtTop = useCallback(
-    (surface: SurfaceName, v: boolean) => {
-      setAtTopBySurface((prev) =>
-        prev[surface] === v ? prev : { ...prev, [surface]: v },
-      );
-      return () => forgetSurface(surface);
-    },
-    [forgetSurface],
-  );
+  const reportAtTop = useCallback((surface: SurfaceName, v: boolean) => {
+    setAtTopBySurface((prev) =>
+      prev[surface] === v ? prev : { ...prev, [surface]: v },
+    );
+  }, []);
   /** True when every mounted surface is pinned to now — nothing to announce anywhere. */
   const allAtTop = useMemo(() => {
     const values = Object.values(atTopBySurface);
@@ -577,6 +594,7 @@ export function ContinuousProvider({ filter, children }: Props) {
       hasMore,
       isLoadingOlder,
       loadOlder,
+      pagesLoaded,
       ensureLoaded,
       reviews,
       reviewsByCamera,
@@ -606,6 +624,7 @@ export function ContinuousProvider({ filter, children }: Props) {
       hasMore,
       isLoadingOlder,
       loadOlder,
+      pagesLoaded,
       ensureLoaded,
       reviews,
       reviewsByCamera,

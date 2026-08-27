@@ -46,6 +46,22 @@ export function useItemWindow<T extends { id: string }>(params: {
   gap?: number;
   onNearEnd?: () => void;
   lanes?: number;
+  /**
+   * A value that changes when a page ARRIVES — callers pass `ctx.pagesLoaded`.
+   *
+   * It exists because `items.length` is not a reliable signal that one did: a 72 h page
+   * whose reviews are all filtered out (`showReviewed` false over an already-reviewed
+   * stretch, which is the DEFAULT view, or a detection-only stretch on the Alerts tab)
+   * adds ZERO visible items. With only `[nearEnd, items.length]` in the deps, `nearEnd`
+   * stayed true, nothing changed, the effect never re-fired, and the surface stopped asking
+   * for older data while history was still there.
+   *
+   * It must be an ARRIVAL counter and not the window edge (`ctx.window.oldest`): the edge
+   * is `loadOlder`'s own output, so keying the re-arm on it closes a feedback loop and the
+   * window chains as fast as the in-flight cap allows — measured at eight pages requested
+   * on a plain page load, which is the runaway the pixel rule above exists to prevent.
+   */
+  windowKey?: number;
 }) {
   const {
     scrollRef,
@@ -54,6 +70,7 @@ export function useItemWindow<T extends { id: string }>(params: {
     gap = 16,
     onNearEnd,
     lanes = 1,
+    windowKey,
   } = params;
 
   const virtualizer = useVirtualizer({
@@ -233,7 +250,7 @@ export function useItemWindow<T extends { id: string }>(params: {
   onNearEndRef.current = onNearEnd;
   useEffect(() => {
     if (nearEnd) onNearEndRef.current?.();
-  }, [nearEnd, items.length]);
+  }, [nearEnd, items.length, windowKey]);
 
   const scrollToId = useCallback(
     (
