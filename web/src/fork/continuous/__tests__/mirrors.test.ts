@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { dedupeMirrors, hasMirrors, mirrorMapFromConfig } from "../mirrors";
+import {
+  dedupeMirrors,
+  expandSelectionWithTwins,
+  expandWithTwins,
+  hasMirrors,
+  mirrorMapFromConfig,
+} from "../mirrors";
 import type { ReviewSegment } from "@/types/review";
 
 // The real shape on this box, measured: entrance_tele mirrors entrance_high and the two
@@ -85,6 +91,16 @@ describe("dedupeMirrors (F19)", () => {
     expect(ids(dedupeMirrors(after, map))).toEqual(["a", "src"]);
   });
 
+  it("keeps mirror rows when the SOURCE CAMERA is filtered out entirely", () => {
+    // e.g. `cameras=entrance_tele`: a per-camera rule would drop every one of these and the
+    // events would appear nowhere at all. Stated invariant in the header — keep it covered.
+    const items = [
+      review("b", "entrance_tele", 5000),
+      review("c", "entrance_tele", 4000),
+    ];
+    expect(ids(dedupeMirrors(items, map))).toEqual(["b", "c"]);
+  });
+
   it("keeps a mirror whose OWN twin is not on the list — one row, never zero", () => {
     // the trap in a per-camera rule: some other entrance_high row being present is not
     // evidence that THIS event's source row is displayed
@@ -136,5 +152,86 @@ describe("dedupeMirrors (F19)", () => {
   it("leaves a single-item list alone", () => {
     const items = [review("b", "entrance_tele", 5000)];
     expect(dedupeMirrors(items, map).items).toEqual(items);
+  });
+});
+
+describe("the three gestures that act on a card (M2)", () => {
+  const map = mirrorMapFromConfig(config);
+  const pair = [
+    review("a", "entrance_high", 5000),
+    review("b", "entrance_tele", 5000),
+    review("solo", "entrance_high", 4000),
+  ];
+  const { items, suppressed } = dedupeMirrors(pair, map);
+  const byId = new Map(pair.map((r) => [r.id, r]));
+
+  it("PLAIN CLICK / hover: marking the visible card marks its twin", () => {
+    // the most common gesture there is, and the one the first fix missed — it only handled
+    // ctrl-click, so an ordinary click removed the visible row and the hidden twin returned
+    expect(expandWithTwins(["a"], suppressed).sort()).toEqual(["a", "b"]);
+  });
+
+  it("SELECTION: a selected card carries its twin into the selection", () => {
+    const sel = expandSelectionWithTwins([items[0]], suppressed, byId);
+    expect(sel.map((r) => r.id).sort()).toEqual(["a", "b"]);
+  });
+
+  it("SELECT ALL: every visible card brings its twin — this is the DELETE path", () => {
+    const sel = expandSelectionWithTwins(items, suppressed, byId);
+    expect(sel.map((r) => r.id).sort()).toEqual(["a", "b", "solo"]);
+  });
+
+  it("negative control: without expansion the hidden half of each pair is left behind", () => {
+    // this is the regression the select-all change introduced — the visible half of every
+    // mirrored pair was deleted and the other half stayed on the server
+    expect(items.map((r) => r.id).sort()).toEqual(["a", "solo"]);
+    expect(items.map((r) => r.id)).not.toContain("b");
+  });
+
+  it("is a no-op when nothing is suppressed", () => {
+    const empty = new Map<string, string[]>();
+    expect(expandWithTwins(["a"], empty)).toEqual(["a"]);
+    expect(expandSelectionWithTwins([pair[0]], empty, byId)).toEqual([pair[0]]);
+  });
+
+  it("does not duplicate a twin that is already selected", () => {
+    const sel = expandSelectionWithTwins([pair[0], pair[1]], suppressed, byId);
+    expect(sel).toHaveLength(2);
+  });
+});
+
+describe("mutual mirror_from", () => {
+  it("keeps exactly ONE row instead of dropping both", () => {
+    // each camera naming the other makes "is the other one my source?" true both ways, so
+    // the naive answer is an empty list — the event vanishes, which is the regression this
+    // file's header is about, arriving through the back door
+    const mutual = mirrorMapFromConfig({
+      cameras: {
+        cam_a: { review: { alerts: { mirror_from: ["cam_b"] } } },
+        cam_b: { review: { alerts: { mirror_from: ["cam_a"] } } },
+      },
+    } as never);
+    const { items, suppressed } = dedupeMirrors(
+      [review("x", "cam_a", 5000), review("y", "cam_b", 5000)],
+      mutual,
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0].camera).toBe("cam_a"); // deterministic keeper, by camera name
+    expect(suppressed.get("x")).toEqual(["y"]);
+  });
+
+  it("is order-independent", () => {
+    const mutual = mirrorMapFromConfig({
+      cameras: {
+        cam_a: { review: { alerts: { mirror_from: ["cam_b"] } } },
+        cam_b: { review: { alerts: { mirror_from: ["cam_a"] } } },
+      },
+    } as never);
+    const reversed = dedupeMirrors(
+      [review("y", "cam_b", 5000), review("x", "cam_a", 5000)],
+      mutual,
+    );
+    expect(reversed.items).toHaveLength(1);
+    expect(reversed.items[0].camera).toBe("cam_a");
   });
 });

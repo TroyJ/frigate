@@ -52,7 +52,6 @@ import PreviewThumbnailPlayer from "@/components/player/PreviewThumbnailPlayer";
 import { useContinuousStrict } from "./ContinuousProvider";
 import { useItemWindow } from "./useItemWindow";
 import { indexAtOrAfter } from "./dayNav";
-import { dedupeMirrors, mirrorMapFromConfig } from "./mirrors";
 import { DegradedReviewCell } from "./cells/DegradedReviewCell";
 
 /**
@@ -105,7 +104,7 @@ export type ContinuousReviewGridProps = {
 
 export function ContinuousReviewGrid({
   contentRef,
-  items: rawItems,
+  items,
   segmentDuration,
   selectedReviews,
   relevantPreviews,
@@ -128,61 +127,15 @@ export function ContinuousReviewGrid({
     [config],
   );
   const configLoaded = config != undefined;
-  const mirrors = useMemo(() => mirrorMapFromConfig(config), [config]);
-  // from the CONTEXT: `useUserPersistence` does not share state between hook instances
-  const dedupe = ctx.dedupeMirrors;
-  const { items, suppressed } = useMemo(() => {
-    if (!dedupe)
-      return { items: rawItems, suppressed: new Map<string, string[]>() };
-    return dedupeMirrors(rawItems, mirrors);
-  }, [rawItems, dedupe, mirrors]);
-
   /**
-   * M2: marking or deleting a visible card must take its SUPPRESSED TWIN with it.
+   * F19: the grid RENDERS the deduped list, it does not compute it.
    *
-   * Dedup runs downstream of the filter, so hiding one row of a pair is only ever a display
-   * choice — the backend still has both. Mark the visible `entrance_high` row and
-   * `patchReviews` removes it from the list; the `entrance_tele` row it was suppressing then
-   * has no visible source, un-suppresses, and pops back into the grid — as an item the user
-   * has just marked, still unreviewed, and which the server was never told about. From the
-   * reader's side the card refuses to go away.
-   *
-   * So the twin rides along with every gesture the grid initiates: `markWithTwins` for the
-   * single mark (hover / open), `selectWithTwins` for a ctrl-click, which is all the bulk
-   * paths need — `r` and the selection toolbar both post `selectedReviews`.
+   * The seam (EventView) owns dedup, because the seam is where every gesture that ACTS on a
+   * review ends up — the selection is built there, "select all" is there, `markReviewed` is
+   * there. Computing it here as well ran the whole scan twice per render AND left each call
+   * site to remember the suppressed twin on its own, which is exactly how a plain click and
+   * a toolbar Delete ended up covering different halves of the same pair.
    */
-  /**
-   * Ctrl-click selects the suppressed twin too.
-   *
-   * That is all the plumbing the BULK paths need: `r` and the selection toolbar both post
-   * `selectedReviews`, so putting both rows in the selection makes them post both ids with
-   * no change to the seam or to upstream. Only a real selection gesture does this — a plain
-   * click opens a review and must not drag a second row into a selection.
-   */
-  const selectWithTwins = useCallback(
-    (review: ReviewSegment, ctrl: boolean, detail: boolean) => {
-      onSelectReview(review, ctrl, detail);
-      if (!ctrl) return;
-      for (const twinId of suppressed.get(review.id) ?? []) {
-        const twin = rawItems.find((it: ReviewSegment) => it.id === twinId);
-        if (twin) onSelectReview(twin, true, detail);
-      }
-    },
-    [onSelectReview, suppressed, rawItems],
-  );
-
-  /** Mark a card AND whatever mirror row it is standing in for. */
-  const markWithTwins = useCallback(
-    (review: ReviewSegment) => {
-      markItemAsReviewed(review);
-      for (const twinId of suppressed.get(review.id) ?? []) {
-        const twin = rawItems.find((it: ReviewSegment) => it.id === twinId);
-        if (twin) markItemAsReviewed(twin);
-      }
-    },
-    [markItemAsReviewed, suppressed, rawItems],
-  );
-
   /**
    * Thumbnails that 404.
    *
@@ -218,6 +171,11 @@ export function ContinuousReviewGrid({
       const src = target.getAttribute("src") || "";
       if (!src.endsWith(thumb)) return;
       setDeadThumbs((prev) => {
+        // Short-circuit if it is already known dead. Without it every retry of the same
+        // broken URL re-identifies the map (a re-render for the whole grid) AND pushes the
+        // TTL out, so a card that fails on a loop would never re-probe — the expiry that
+        // exists to heal a transient failure would be reset by the failure itself.
+        if (prev.has(id)) return prev;
         const next = new Map(prev);
         next.set(id, Date.now());
         return next;
@@ -488,11 +446,11 @@ export function ContinuousReviewGrid({
                         review={review}
                         allPreviews={relevantPreviews}
                         timeRange={timeRange}
-                        setReviewed={(rev) => markWithTwins(rev)}
+                        setReviewed={markItemAsReviewed}
                         scrollLock={scrollLock}
                         onTimeUpdate={onPreviewTimeUpdate}
                         onClick={(rev, ctrl, detail) =>
-                          selectWithTwins(rev, ctrl, detail)
+                          onSelectReview(rev, ctrl, detail)
                         }
                       />
                     )}

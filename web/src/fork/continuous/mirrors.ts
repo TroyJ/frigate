@@ -12,16 +12,21 @@
  *   - its camera declares `mirror_from` containing the other row's camera, AND
  *   - the two rows have the same severity, AND
  *   - their `start_time`s are IDENTICAL.
- * The mirroring backend copies the source's `start_time`, so in practice the match is
- * exact — measured byte-identical (`1786636678.713004` on both `entrance_high` and
- * `entrance_tele`), which is also the twin trap the L2 harness has its own note about. The
- * tolerance exists so a future implementation that re-derives the timestamp does not
- * silently stop de-duplicating; it is small enough that two genuinely separate events on
- * the two sensors two seconds apart are still two rows.
+ * The mirroring backend copies the source's `start_time`, so the match is exact — measured
+ * byte-identical (`1786636678.713004` on both `entrance_high` and `entrance_tele`), which is
+ * also the twin trap the L2 harness has its own note about. An earlier version allowed a
+ * ±2 s tolerance; it bought nothing against a byte-identical copy and could cross-match two
+ * genuinely separate events two seconds apart, which LOSES one of them — the failure this
+ * whole file exists to avoid.
  *
  * The SOURCE row is the one kept. It is the camera the event was actually detected on, its
  * thumbnail is the one with the detection in it, and keeping the mirror instead would make
  * the surviving row's camera depend on page arrival order.
+ *
+ * **Suppression is a display choice, so the hidden row is still the caller's problem.**
+ * `dedupeMirrors` returns the keeper→twins map, and every gesture that acts on a card has to
+ * act on what that card is standing in for — see `expandWithTwins`, and the three choke
+ * points in `EventView` that use it.
  */
 import { ReviewSegment } from "@/types/review";
 import { FrigateConfig } from "@/types/frigateConfig";
@@ -141,7 +146,67 @@ export function dedupeMirrors(
       out.push(item);
       continue;
     }
+    /**
+     * MUTUAL `mirror_from` would otherwise drop both rows and lose the event entirely —
+     * the regression this file's header names, arriving through the back door. If each
+     * camera declares the other, "is the other one my source?" is true in both directions
+     * and neither survives. Break the tie deterministically, on camera name: exactly one of
+     * the pair keeps, whichever order they arrive in.
+     */
+    const mutual = (mirrors.get(keeper.camera) ?? []).includes(item.camera);
+    if (mutual && item.camera < keeper.camera) {
+      out.push(item);
+      continue;
+    }
     suppressed.set(keeper.id, [...(suppressed.get(keeper.id) ?? []), item.id]);
   }
   return { items: out, suppressed };
+}
+
+/**
+ * Expand a set of review ids to include everything those reviews are standing in for.
+ *
+ * The ONE place the suppression map is consumed, so that "acts on the card" and "acts on the
+ * event" cannot drift apart per call site. Fixing this per gesture was the first attempt and
+ * it left the two most ordinary paths uncovered: a PLAIN CLICK (which marks the row it
+ * opened) and a plain click while a selection is active (which is a selection gesture). The
+ * seam has exactly three choke points — the selection is built, the selection is
+ * select-all'd, or a single review is marked — and all three go through here.
+ */
+export function expandWithTwins(
+  ids: string[],
+  suppressed: Map<string, string[]>,
+): string[] {
+  if (!suppressed.size) return ids;
+  const out = new Set(ids);
+  for (const id of ids) for (const t of suppressed.get(id) ?? []) out.add(t);
+  return [...out];
+}
+
+/**
+ * The same expansion, as ReviewSegments — for the selection, which upstream stores as
+ * objects rather than ids.
+ *
+ * `byId` is built once by the caller: resolving each twin with `Array.find` is O(n) per
+ * gesture, and at the review floor `n` is thousands.
+ */
+export function expandSelectionWithTwins(
+  selected: ReviewSegment[],
+  suppressed: Map<string, string[]>,
+  byId: Map<string, ReviewSegment>,
+): ReviewSegment[] {
+  if (!suppressed.size) return selected;
+  const out = [...selected];
+  const seen = new Set(selected.map((r) => r.id));
+  for (const review of selected) {
+    for (const twinId of suppressed.get(review.id) ?? []) {
+      if (seen.has(twinId)) continue;
+      const twin = byId.get(twinId);
+      if (twin) {
+        out.push(twin);
+        seen.add(twinId);
+      }
+    }
+  }
+  return out;
 }

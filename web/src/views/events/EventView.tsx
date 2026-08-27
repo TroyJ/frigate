@@ -43,6 +43,8 @@ import {
   ContinuousReviewGrid,
   ContinuousEventStrip,
   dedupeMirrors,
+  expandSelectionWithTwins,
+  expandWithTwins,
   mirrorMapFromConfig,
   ContinuousMotionStrip,
   ContinuousNewChip,
@@ -93,6 +95,9 @@ type EventViewProps = {
   pullLatestData: () => void;
   updateFilter: (filter: ReviewFilter) => void;
 };
+/** Shared empty map: a fresh one per render would re-identify every memo that depends on it. */
+const EMPTY_SUPPRESSED: Map<string, string[]> = new Map();
+
 export default function EventView({
   reviewItems,
   currentReviewItems,
@@ -138,15 +143,33 @@ export default function EventView({
    * Only "select all" needs it: the grid does its own dedup (it owns the suppression map
    * that mark/delete rides on), and every other consumer wants the full list.
    */
+  /** Stable empty map — a fresh `new Map()` per render would re-identify every consumer. */
   const mirrorMap = useMemo(() => mirrorMapFromConfig(config), [config]);
   const dedupeOn = continuous.enabled && continuous.dedupeMirrors;
-  const continuousVisibleItems = useMemo(
+  /**
+   * F19's dedup, computed ONCE here rather than in the grid.
+   *
+   * The grid renders `items`, but the seam is where every gesture that ACTS on a review ends
+   * up — the selection is built here, "select all" is here, and `markReviewed` is here — so
+   * this is the only place that can guarantee a hidden twin is never left behind. Doing it
+   * in the grid and patching each call site was the first attempt and it missed the two most
+   * ordinary gestures; doing it in both places also ran the whole scan twice per render.
+   */
+  const dedup = useMemo(
     () =>
       continuousItems && dedupeOn
-        ? dedupeMirrors(continuousItems, mirrorMap).items
-        : continuousItems,
+        ? dedupeMirrors(continuousItems, mirrorMap)
+        : { items: continuousItems, suppressed: EMPTY_SUPPRESSED },
     [continuousItems, dedupeOn, mirrorMap],
   );
+  const continuousVisibleItems = dedup.items;
+  /** id → review, for resolving twins without an O(n) scan per gesture. */
+  const reviewsById = useMemo(() => {
+    const map = new Map<string, ReviewSegment>();
+    if (dedup.suppressed.size)
+      for (const r of continuousItems ?? []) map.set(r.id, r);
+    return map;
+  }, [continuousItems, dedup.suppressed]);
 
   // fork: upstream's mark-reviewed mutations write into the 24 h `reviews` SWR cache,
   // which the continuous surfaces do not read. Mirror them into the provider's override
@@ -156,10 +179,20 @@ export default function EventView({
   const patchContinuous = continuous.enabled ? continuous.patchReviews : null;
   const markReviewed = useCallback(
     (review: ReviewSegment) => {
-      patchContinuous?.([review.id], { has_been_reviewed: true });
+      // F19 choke point: marking the card marks what it is standing in for. Without this a
+      // PLAIN CLICK — the most common gesture there is — removes the visible row, the hidden
+      // twin then has no visible source, un-suppresses, and returns as an item the reader
+      // has just dealt with that the server was never told about.
+      const ids = expandWithTwins([review.id], dedup.suppressed);
+      patchContinuous?.(ids, { has_been_reviewed: true });
       markItemAsReviewed(review);
+      for (const id of ids) {
+        if (id === review.id) continue;
+        const twin = reviewsById.get(id);
+        if (twin) markItemAsReviewed(twin);
+      }
     },
-    [markItemAsReviewed, patchContinuous],
+    [markItemAsReviewed, patchContinuous, dedup.suppressed, reviewsById],
   );
   const markManyReviewed = useCallback(
     (items: ReviewSegment[]) => {
@@ -264,8 +297,18 @@ export default function EventView({
             setSelectedReviews(copy);
           }
         } else {
-          const copy = [...selectedReviews];
-          copy.push(review);
+          // F19 choke point: a selected card carries its suppressed twin into the selection,
+          // so `r` and the toolbar's mark/DELETE act on the event rather than on the half of
+          // it that happens to be rendered. This covers the ctrl-click path and the
+          // plain-click-while-a-selection-is-active path, which is also a selection gesture.
+          const copy = [
+            ...selectedReviews,
+            ...expandSelectionWithTwins(
+              [review],
+              dedup.suppressed,
+              reviewsById,
+            ),
+          ];
           setSelectedReviews(copy);
         }
       } else {
@@ -300,6 +343,8 @@ export default function EventView({
       markReviewed,
       timeRange.after,
       continuous.enabled,
+      dedup.suppressed,
+      reviewsById,
     ],
   );
   const onSelectAllReviews = useCallback(() => {
@@ -317,11 +362,23 @@ export default function EventView({
     }
 
     if (selectedReviews.length < selectable.length) {
-      setSelectedReviews(selectable);
+      // F19 choke point, and the DESTRUCTIVE one: the toolbar's Delete posts exactly these
+      // ids. Selecting only the visible half of every mirrored pair deleted half of each
+      // event and left the other half on the server — which then un-suppressed and rendered.
+      // The count the user sees is still `selectable.length`; what is ACTED ON is the events.
+      setSelectedReviews(
+        expandSelectionWithTwins(selectable, dedup.suppressed, reviewsById),
+      );
     } else {
       setSelectedReviews([]);
     }
-  }, [continuousVisibleItems, currentReviewItems, selectedReviews]);
+  }, [
+    continuousVisibleItems,
+    currentReviewItems,
+    selectedReviews,
+    dedup.suppressed,
+    reviewsById,
+  ]);
 
   const exportReview = useCallback(
     (id: string) => {
@@ -564,7 +621,11 @@ export default function EventView({
             contentRef={contentRef}
             reviewItems={reviewItems}
             currentItems={currentReviewItems}
-            continuousItems={continuousItems}
+            // S1 gets the DEDUPED list (F19). The seam owns dedup so that the gestures
+            // which act on a card can carry the row it is standing in for — see `dedup`
+            // above. S3 (MotionReview, below) keeps the raw list: F19 is a Review-GRID
+            // toggle, and two rows with an identical start_time draw the same band anyway.
+            continuousItems={continuousVisibleItems}
             relevantPreviews={relevantPreviews}
             selectedReviews={selectedReviews}
             itemsToReview={reviewCounts[severityToggle]}
