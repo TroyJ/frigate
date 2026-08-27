@@ -82,9 +82,25 @@ export function offeredZoomLevels<T extends ZoomLevelLike>(
   const allowed = levels.filter(
     (l) => l.segmentDuration >= PINNED_SEGMENT_DURATION,
   );
-  return allowed.some((l) => l.segmentDuration === currentSegmentDuration)
-    ? allowed
-    : levels;
+  if (allowed.some((l) => l.segmentDuration === currentSegmentDuration))
+    return allowed;
+  /**
+   * The user is already FINER than the pin (they zoomed in, then scrolled deep).
+   *
+   * Truncating to `allowed` would drop their current level, `currentZoomLevel` goes to −1
+   * and upstream hides the control entirely — so they keep a list. But it must be a list
+   * that ENDS where they are: leaving the finer levels on it means upstream's zoom-in button
+   * is enabled (they are not at the last index) and `zoomChangeAllowed` then refuses the
+   * click. That is the same enabled-but-inert trap M1 closed in the other direction.
+   */
+  return [
+    ...allowed,
+    ...levels.filter(
+      (l) =>
+        l.segmentDuration < PINNED_SEGMENT_DURATION &&
+        l.segmentDuration >= currentSegmentDuration,
+    ),
+  ];
 }
 
 /**
