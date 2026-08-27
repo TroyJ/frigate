@@ -31,9 +31,22 @@ import { ReviewSegment } from "@/types/review";
 import { dayKeyToStartInTz, pagesFor } from "./timeAlign";
 
 /**
- * Index of the OLDEST item whose `start_time >= t`, for a list sorted newest-first (D23).
+ * Index of the OLDEST item whose `start_time >= t`, for a list sorted newest-first (D23) —
+ * and, when several items share that exact `start_time`, the FIRST of them.
+ *
  * Returns 0 (the newest item) when everything loaded is older than `t`, and -1 only for an
  * empty list — callers may treat -1 as "nothing to scroll to".
+ *
+ * The tie rule is not hypothetical here. The villa's entrance unit is dual-sensor, so
+ * `entrance_high` and `entrance_tele` routinely emit two review segments with a
+ * byte-identical `start_time` (measured: `1787004201.308952` on both, and
+ * `1786636678.713004` in the harness's own notes). A day's earliest review is therefore
+ * regularly a PAIR, and returning the second of the pair moved the day-jump one card along —
+ * invisible until the pair straddles a row boundary on the 3-column grid, at which point the
+ * grid scrolls to the second twin's row and the first twin sits exactly one row ABOVE the
+ * viewport. Measured as `offsetTop -256` on a 240 px row, intermittently, because whether
+ * the pair straddles a boundary depends on how many items are in the list that second.
+ * Landing on the first of the tie puts the whole moment on screen.
  */
 export function indexAtOrAfter(
   items: Pick<ReviewSegment, "start_time">[],
@@ -41,7 +54,13 @@ export function indexAtOrAfter(
 ): number {
   if (!items.length) return -1;
   for (let i = items.length - 1; i >= 0; i--) {
-    if (items[i].start_time >= t) return i;
+    if (items[i].start_time >= t) {
+      let first = i;
+      while (first > 0 && items[first - 1].start_time === items[i].start_time) {
+        first--;
+      }
+      return first;
+    }
   }
   return 0;
 }

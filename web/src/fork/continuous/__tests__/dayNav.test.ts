@@ -30,6 +30,24 @@ describe("indexAtOrAfter", () => {
     expect(indexAtOrAfter([], 100)).toBe(-1);
   });
 
+  it("lands on the FIRST of an equal-timestamp run (the dual-sensor twins)", () => {
+    // `entrance_high` and `entrance_tele` emit segments with a byte-identical start_time, so
+    // a day's earliest review is regularly a pair. Returning the second moved a day-jump one
+    // card along, which on a 3-column grid put the first twin one row ABOVE the viewport
+    // whenever the pair straddled a row boundary — measured at -256 px, intermittently.
+    const twins = [
+      { start_time: 500 },
+      { start_time: 300 },
+      { start_time: 300 },
+      { start_time: 300 },
+      { start_time: 100 },
+    ];
+    expect(indexAtOrAfter(twins, 300)).toBe(1);
+    expect(indexAtOrAfter(twins, 250)).toBe(1);
+    // …and the tie rule must not reach past items that are genuinely older than t
+    expect(indexAtOrAfter(twins, 50)).toBe(4);
+  });
+
   it("an empty day lands on the nearest item AFTER it, not at the bottom", () => {
     // D14's fallback on a sparse surface. The regression this guards against matched the
     // OLDEST loaded item on its first comparison, so every jump landed at the end of the

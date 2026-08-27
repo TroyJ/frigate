@@ -64,6 +64,8 @@ type Params = {
   openRecording: (open: DeepLinkOpen) => void;
   /** D19: relax the Review page's view so the target is visible. */
   revealOnReviewPage?: (review: ReviewSegment) => boolean;
+  /** Apply a validated `?tab=` (§2A.4) — it is contract even without an `id`. */
+  onTab?: (tab: TimelineType) => void;
   /** For a bare `?t=` on History, which camera to open. */
   cameraForMoment?: string;
   /** Oldest retained recording, for the "older than retention" case (§2A.5). */
@@ -75,10 +77,14 @@ function surfaceFor(
   view: DeepLinkRequest["view"],
   tab: TimelineType,
 ): SurfaceName | undefined {
-  if (view === "review") return "grid";
-  // On History the three tabs ARE the three surfaces (S4/S5/S6), and `?tab=` already chose
-  // one; naming it here means the navigation waits for that surface rather than for
-  // whichever happened to register last.
+  // The Review page gets NO named surface, so the provider broadcasts to every mounted one.
+  // That is its own rule (see `scrollToTop`): the grid AND the strip are on screen together,
+  // and naming only the grid left the strip showing a different day beside a card the link
+  // had just landed on. Each surface then does the D14-correct thing with the same request.
+  if (view === "review") return undefined;
+  // On History the three tabs ARE the three surfaces (S4/S5/S6) and only one is mounted, so
+  // naming it means the navigation WAITS for that surface instead of firing at whichever
+  // registered first — which matters because the panel mounts after the link resolves.
   return tab as SurfaceName;
 }
 
@@ -115,6 +121,7 @@ export function useContinuousDeepLink({
   ready,
   openRecording,
   revealOnReviewPage,
+  onTab,
   cameraForMoment,
   oldestRecording,
 }: Params): DeepLinkResult {
@@ -123,8 +130,20 @@ export function useContinuousDeepLink({
   const navigate = useNavigate();
 
   const [nav, setNav] = useState<DeepLinkNav>();
-  const [problem, setProblem] = useState<DeepLinkProblem>();
-  const dismissProblem = useCallback(() => setProblem(undefined), []);
+  /**
+   * TWO slots, one precedence rule: a problem found while RESOLVING the link (it is gone,
+   * its footage expired, the view had to be relaxed) always outranks one found while
+   * PARSING it (a bad `tab`, a nonsense `t`). Mixing "overwrite" and "keep the first" across
+   * call sites made the message depend on which async step happened to finish last — the
+   * user could be told their `tab` was invalid instead of that the alert no longer exists.
+   */
+  const [parseProblem, setParseProblem] = useState<DeepLinkProblem>();
+  const [resolveProblem, setResolveProblem] = useState<DeepLinkProblem>();
+  const [dismissed, setDismissed] = useState(false);
+  const problem = dismissed ? undefined : (resolveProblem ?? parseProblem);
+  const dismissProblem = useCallback(() => setDismissed(true), []);
+  /** The moment the link navigated to, for the late footage-expired check below. */
+  const [navigatedStart, setNavigatedStart] = useState<number>();
 
   const request = useMemo(
     () =>
@@ -143,14 +162,14 @@ export function useContinuousDeepLink({
   const latest = useRef({
     openRecording,
     revealOnReviewPage,
+    onTab,
     cameraForMoment,
-    oldestRecording,
   });
   latest.current = {
     openRecording,
     revealOnReviewPage,
+    onTab,
     cameraForMoment,
-    oldestRecording,
   };
 
   // React 18 StrictMode mounts every effect twice in dev, and this one fires an HTTP GET
@@ -174,7 +193,11 @@ export function useContinuousDeepLink({
       replace: true,
     });
 
-    if (request.problems.length) setProblem(request.problems[0]);
+    if (request.problems.length) setParseProblem(request.problems[0]);
+    // §2A.4's MUST-NOT-REGRESS table: `tab` is part of the contract on its own, not only
+    // alongside `id`. Upstream consumed `?tab=` unconditionally; handing ownership to this
+    // handler and then ignoring the bare case would silently drop it.
+    latest.current.onTab?.(request.tab);
 
     if (!request.id) {
       if (request.t === undefined) return;
@@ -183,7 +206,9 @@ export function useContinuousDeepLink({
         // No camera to open — the History scrubber is per-camera. Say so rather than
         // opening an arbitrary one.
         if (!camera) {
-          setProblem("review-unavailable");
+          // Reachable: `cameraForMoment` falls back to the first configured camera, so this
+          // is the genuinely camera-less install (or config not loaded when the link fired).
+          setResolveProblem("review-unavailable");
           return;
         }
         latest.current.openRecording({
@@ -208,18 +233,20 @@ export function useContinuousDeepLink({
     axios
       .get<ReviewSegment>(`review/${request.id}`)
       .then(async (resp) => {
+        // No `resp.status !== 200` branch: axios REJECTS a non-2xx, so it would be dead
+        // code. An empty body is the only success-shaped failure left.
         const review = resp.data;
-        if (resp.status !== 200 || !review) {
-          setProblem("review-missing");
+        if (!review) {
+          setResolveProblem("review-missing");
           return;
         }
         const startTime = review.start_time - REVIEW_PADDING;
-        const oldest = latest.current.oldestRecording;
-        // Resolved, but there is no footage left for it: land on it anyway (D7/D21 paint
-        // the blackout with the reason) and say why the video is missing.
-        if (oldest !== undefined && review.start_time < oldest) {
-          setProblem("footage-expired");
-        }
+        // The footage-expired check does NOT happen here: `oldestRecording` comes from an
+        // SWR call that is usually still in flight on a cold load, so sampling it once at
+        // this instant meant §2A.5's "older than retention" reason simply never appeared for
+        // the links most likely to need it. It is an effect below, keyed on the horizon
+        // becoming known.
+        setNavigatedStart(review.start_time);
         if (request.view === "history") {
           latest.current.openRecording({
             camera: review.camera,
@@ -231,7 +258,7 @@ export function useContinuousDeepLink({
           latest.current.revealOnReviewPage?.(await withReviewedFlag(review))
         ) {
           // D19: we changed what the page shows in order to reach the target — say so.
-          setProblem((prev) => prev ?? "filters-adjusted");
+          setResolveProblem((prev) => prev ?? "filters-adjusted");
         }
         setNav({
           t: startTime,
@@ -242,7 +269,7 @@ export function useContinuousDeepLink({
       .catch((err) => {
         // D9: a stored link routinely points at something that is gone. 404 is the normal
         // case and gets the specific wording; anything else is "could not be loaded".
-        setProblem(
+        setResolveProblem(
           err?.response?.status === 404
             ? "review-missing"
             : "review-unavailable",
@@ -250,6 +277,19 @@ export function useContinuousDeepLink({
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, request]);
+
+  /**
+   * §2A.5 row 2 — "older than retention": land on it, and say why there is no video.
+   *
+   * Keyed on the horizon rather than evaluated inline, because `recordingsSummary` is an SWR
+   * call that has usually not resolved when a cold-loaded link finishes resolving its id.
+   * Evaluated once per navigation, and never over a problem that outranks it.
+   */
+  useEffect(() => {
+    if (navigatedStart === undefined || oldestRecording === undefined) return;
+    if (navigatedStart >= oldestRecording) return;
+    setResolveProblem((prev) => prev ?? "footage-expired");
+  }, [navigatedStart, oldestRecording]);
 
   return { nav, tab: request?.tab ?? DEFAULT_TAB, problem, dismissProblem };
 }

@@ -60,7 +60,12 @@ export type DeepLinkRequest = {
 
 /** Earliest timestamp a real recording could carry — 2000-01-01T00:00:00Z. */
 const MIN_PLAUSIBLE = 946_684_800;
-/** Anything past this is milliseconds, not seconds (2001-09-09 in seconds). */
+/**
+ * Anything at or past this is milliseconds, not seconds: 1e11 SECONDS is the year 5138, so
+ * a value that large cannot be an epoch-seconds recording moment, while as milliseconds it
+ * is 1973 — i.e. every plausible ms timestamp is above it and every plausible s timestamp is
+ * below it.
+ */
 const MS_THRESHOLD = 1e11;
 /** A link may point a little into the future (clock skew); a year is not skew. */
 const MAX_FUTURE_SKEW = 86_400;
@@ -131,10 +136,16 @@ export function parseDeepLink(
   if (!viewValid) problems.push("invalid-surface");
   if (hasT && t === undefined) problems.push("invalid-time");
 
-  // A `?tab=`/`?surface=` on its own is not a navigation — it is a preference for whatever
-  // the page does next — but an INVALID one still has to be reported, or the fallback is
-  // once again indistinguishable from the link having worked.
-  if (!id && t === undefined && problems.length === 0) return undefined;
+  // Present, not merely useful. A `?tab=`/`?surface=` on its own is not a navigation — it is
+  // a preference for what the page does next — but it IS in §2A.4's must-not-regress table
+  // and upstream consumed it unconditionally, so the handler that took ownership of the
+  // param has to return it (and strip it from the URL) rather than leave it dangling.
+  const present =
+    !!id ||
+    hasT ||
+    (raw.tab != null && raw.tab !== "") ||
+    (raw.surface != null && raw.surface !== "");
+  if (!present) return undefined;
 
   return { id, t, tab, view, problems };
 }

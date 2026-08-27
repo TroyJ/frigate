@@ -73,7 +73,20 @@ describe("parseDeepLink", () => {
   it("is undefined when the URL carries nothing this handler owns", () => {
     // …so upstream's cameras/labels/zones/group handlers are left alone (§2A.4)
     expect(parseDeepLink({}, NOW)).toBeUndefined();
-    expect(parseDeepLink({ tab: "detail" }, NOW)).toBeUndefined();
+    expect(parseDeepLink({ id: null, t: "", tab: null }, NOW)).toBeUndefined();
+  });
+
+  it("a bare `?tab=` is still a request — it is contract, and must be consumed", () => {
+    // upstream's `useSearchEffect("tab")` consumed it with or without an id; the fork owns
+    // the param now, so returning undefined here would silently drop a working link
+    expect(parseDeepLink({ tab: "detail" }, NOW)).toEqual({
+      id: undefined,
+      t: undefined,
+      tab: "detail",
+      view: "history",
+      problems: [],
+    });
+    expect(parseDeepLink({ surface: "review" }, NOW)?.view).toBe("review");
   });
 
   it("the notification contract still parses exactly as it always did", () => {

@@ -51,6 +51,7 @@ import {
   DAY,
   EDGE_ALIGN,
   HOUR,
+  Page,
   alignUp,
   dayKeyToStartInTz,
   floorHourInTz,
@@ -184,6 +185,34 @@ const ContinuousContext = createContext<ContinuousContextValue | undefined>(
   undefined,
 );
 
+/**
+ * A SECOND, narrow context for the calendar seam (D1).
+ *
+ * `ReviewFilterGroup` and `MobileReviewSettingsDrawer` are upstream components that need
+ * exactly three things — is the toggle on, which day is in view, and how to navigate — and
+ * subscribing them to the whole context would re-render both on every provider state change,
+ * which includes the playhead at four times a second. They are mounted on both pages, so
+ * that is a real cost paid for a button label. Everything here is either stable for the
+ * provider's life (`navigateToTime`, `scrollToTop`, `tz`) or changes at most once a day
+ * (`calendarDay`).
+ */
+export type ContinuousNavValue = {
+  enabled: boolean;
+  tz: string;
+  calendarDay?: number;
+  navigateToTime: (t: number, opts?: NavigateOptions) => Promise<void>;
+  scrollToTop: () => void;
+};
+
+const ContinuousNavContext = createContext<ContinuousNavValue | undefined>(
+  undefined,
+);
+
+/** Safe outside the provider: `enabled: false` means "run upstream's path unchanged". */
+export function useContinuousNav(): ContinuousNavValue | { enabled: false } {
+  return useContext(ContinuousNavContext) ?? { enabled: false };
+}
+
 export const TAIL_TICK_MS = 30_000;
 const INITIAL_SPAN = DAY;
 /** §10: `/review` is cheap; page it generously, drop to 1 day when the first page is slow. */
@@ -201,8 +230,18 @@ const NAV_SETTLE_MS = 8_000;
 const NAV_RETRY_MS = 250;
 /** Trailing debounce for the calendar's follow-the-surface day (see `reportViewTime`). */
 const CALENDAR_FOLLOW_MS = 400;
-/** 50 ms apart — 30 s, which has to cover every page between the target and now. */
-const ENSURE_LOADED_TRIES = 600;
+/**
+ * `ensureLoaded`'s poll budget, deliberately sized UNDER `NAV_SETTLE_MS`.
+ *
+ * A wait that outlives the navigation it is for is not a safety net, it is a stall: the user
+ * clicked a day and nothing happens while a loop counts. The navigation is bounded at
+ * `NAV_SETTLE_MS`, so paging gets a little less than that and then the surface scrolls
+ * against whatever loaded (§2A.5 — a stated outcome beats a spinner).
+ */
+const ENSURE_LOADED_POLL_MS = 50;
+const ENSURE_LOADED_TRIES = Math.floor(
+  (NAV_SETTLE_MS * 0.75) / ENSURE_LOADED_POLL_MS,
+);
 
 type Props = {
   filter: ContinuousFilter;
@@ -452,17 +491,30 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
     async (t: number) => {
       const target = Math.max(floor, floorHourInTz(t - HOUR, tz));
       setOldest((prev) => Math.min(prev, target));
-      const wanted = pagesFor(target, newestRef.current, pageHours.current, tz);
-      if (!wanted.length) return;
-      const settled = (after: number) => {
+      // RE-COMPUTED every poll, against the CURRENT page tier. `pageHours` flips 72 → 24 the
+      // first time a page takes longer than SLOW_PAGE_MS — and a deep jump is exactly what
+      // trips that — which re-lattices every key through `snapToSpanGrid`. A `wanted` list
+      // captured once before the flip then names pages that will never be requested under
+      // the new tier, and the loop waits out its entire budget for keys that cannot arrive.
+      const stillWanted = () =>
+        pagesFor(target, newestRef.current, pageHours.current, tz);
+      // "Absent" is only unsettled while the page is still one this window wants: the abort
+      // path DELETES a page (see `fetchPage`), so an absent key that is no longer on the
+      // lattice is finished business, not something to wait for.
+      const settled = (after: number, wanted: Page[]) => {
         const p = pagesRef.current.get(after);
-        return !!p && p.status !== "loading" && p.status !== "queued";
+        if (p) return p.status !== "loading" && p.status !== "queued";
+        return !wanted.some((w) => w.after === after);
       };
       // Bounded, because a page can fail: the navigation still has to happen, against
-      // whatever did load, rather than being dropped in silence (§2A.5).
+      // whatever did load, rather than being dropped in silence (§2A.5). The budget sits
+      // just under NAV_SETTLE_MS so a stall cannot outlive the navigation it is for.
       for (let i = 0; i < ENSURE_LOADED_TRIES; i++) {
-        if (wanted.every((p) => settled(p.after))) return;
-        await new Promise((r) => setTimeout(r, 50));
+        const wanted = stillWanted();
+        if (!wanted.length || wanted.every((p) => settled(p.after, wanted))) {
+          return;
+        }
+        await new Promise((r) => setTimeout(r, ENSURE_LOADED_POLL_MS));
       }
     },
     [floor, tz],
@@ -635,18 +687,47 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
     intent: opts?.intent ?? "moment",
   });
 
-  const registerSurface = useCallback((name: SurfaceName, api: SurfaceApi) => {
-    surfaces.current.set(name, api);
-    activeSurface.current = name;
-    const nav = pendingNav.current;
-    if (nav && (!nav.opts?.surface || nav.opts.surface === name)) {
-      pendingNav.current = undefined;
-      api.scrollToTime(nav.t, scrollOptsFor(nav.opts));
-    }
-    return () => {
-      surfaces.current.delete(name);
-    };
+  const navSeq = useRef(0);
+  const [navRequest, setNavRequest] = useState<{
+    seq: number;
+    t: number;
+    opts?: NavigateOptions;
+    deadline: number;
+  }>();
+  const issueNav = useCallback((t: number, opts?: NavigateOptions) => {
+    navSeq.current += 1;
+    setNavRequest({
+      seq: navSeq.current,
+      t,
+      opts,
+      deadline: Date.now() + NAV_SETTLE_MS,
+    });
   }, []);
+
+  const registerSurface = useCallback(
+    (name: SurfaceName, api: SurfaceApi) => {
+      surfaces.current.set(name, api);
+      activeSurface.current = name;
+      const nav = pendingNav.current;
+      if (nav && (!nav.opts?.surface || nav.opts.surface === name)) {
+        pendingNav.current = undefined;
+        if (nav.opts?.surface) {
+          api.scrollToTime(nav.t, scrollOptsFor(nav.opts));
+        } else {
+          // An UNNAMED navigation is meant for every mounted surface (a Review-page deep
+          // link: the grid and the strip are on screen together). Replaying it into the one
+          // surface that happened to register first would leave the other on another day, so
+          // it is re-issued and the effect below fans it out after this commit, by which
+          // time the page's other surfaces have registered too.
+          issueNav(nav.t, nav.opts);
+        }
+      }
+      return () => {
+        surfaces.current.delete(name);
+      };
+    },
+    [issueNav],
+  );
 
   const registerSeek = useCallback((fn: (t: number) => void) => {
     seekRef.current = fn;
@@ -710,28 +791,14 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
    * for a deep link, reliably the wrong card. The request is parked instead and performed by
    * an effect, which by definition runs after the commit that carries the page.
    */
-  const navSeq = useRef(0);
-  const [navRequest, setNavRequest] = useState<{
-    seq: number;
-    t: number;
-    opts?: NavigateOptions;
-    deadline: number;
-  }>();
-
   const navigateToTime = useCallback(
     async (t: number, opts?: NavigateOptions) => {
       if (!Number.isFinite(t)) return;
       if (opts?.selectId) setSelectedId(opts.selectId);
       await ensureLoaded(t);
-      navSeq.current += 1;
-      setNavRequest({
-        seq: navSeq.current,
-        t,
-        opts,
-        deadline: Date.now() + NAV_SETTLE_MS,
-      });
+      issueNav(t, opts);
     },
-    [ensureLoaded],
+    [ensureLoaded, issueNav],
   );
 
   useEffect(() => {
@@ -764,8 +831,6 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
       return;
     }
     if (step === "wait") {
-      // eslint-disable-next-line no-console
-      console.log("FORKNAV wait", Date.now(), req.seq);
       const timer = setTimeout(
         () =>
           setNavRequest((cur) =>
@@ -775,8 +840,6 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
       );
       return () => clearTimeout(timer);
     }
-    // eslint-disable-next-line no-console
-    console.log("FORKNAV go", Date.now(), JSON.stringify({t: req.t, step, targets: targets.length}));
     for (const api of targets) api.scrollToTime(req.t, scrollOptsFor(req.opts));
     // D15: History registered a seeker, the Review page did not — see `registerSeek`.
     if (req.opts?.seek !== false) seekRef.current?.(req.t);
@@ -877,6 +940,14 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
     ],
   );
 
+  // The narrow calendar context — see `ContinuousNavValue`. Deliberately NOT derived from
+  // `value`: that object changes on every provider state update, which is the churn this
+  // exists to keep away from two upstream components.
+  const navValue = useMemo<ContinuousNavValue>(
+    () => ({ enabled, tz, calendarDay, navigateToTime, scrollToTop }),
+    [enabled, tz, calendarDay, navigateToTime, scrollToTop],
+  );
+
   // The toggle is read from IndexedDB asynchronously. RecordingView initialises
   // `selectedRangeIdx` from whichever chunk list it sees at MOUNT, so children must not
   // mount until we know which list that is — otherwise an index into upstream's 24-chunk
@@ -885,7 +956,9 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
   if (!toggleLoaded) return null;
   return (
     <ContinuousContext.Provider value={value}>
-      {children}
+      <ContinuousNavContext.Provider value={navValue}>
+        {children}
+      </ContinuousNavContext.Provider>
     </ContinuousContext.Provider>
   );
 }

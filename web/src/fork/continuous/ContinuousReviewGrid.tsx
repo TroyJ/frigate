@@ -259,8 +259,6 @@ export function ContinuousReviewGrid({
           // The intent needs no branch HERE — on a sparse surface "the first item at or
           // after 00:00" IS the day's earliest review — and an empty day lands on the
           // nearest item after it, which is the closest thing to a day with no cards.
-          // eslint-disable-next-line no-console
-          console.log("FORKNAV grid.scrollToTime", Date.now(), JSON.stringify({t, sel: opts?.selectId}));
           const idx = indexAtOrAfter(items, t);
           if (idx >= 0)
             win.scrollToIndex(Math.floor(idx / columns), { align: "start" });

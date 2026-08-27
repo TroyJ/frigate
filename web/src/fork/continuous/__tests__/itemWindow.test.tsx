@@ -16,7 +16,7 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { act, useRef } from "react";
 import { createRoot, Root } from "react-dom/client";
-import { useItemWindow } from "../useItemWindow";
+import { MAX_EMPTY_EXTENSIONS, useItemWindow } from "../useItemWindow";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -27,6 +27,15 @@ type Item = { id: string };
 
 /** Items the surface would RENDER — deliberately few, so `nearEnd` is true throughout. */
 const ITEMS: Item[] = [{ id: "a" }, { id: "b" }];
+
+/**
+ * jsdom reports every element as 0x0, which makes `remainingPx <= max(viewport, 400)` true
+ * for ANY list — so without a viewport the pixel rule can never say "no" and a test claiming
+ * to see it stop is measuring nothing. `clientHeight` is defined on the scroller so the
+ * distance rule has real numbers to work with: 400 items x 100 px against a 500 px viewport
+ * leaves ~39,000 px below, far past the lookahead, so `nearEnd` is genuinely false there.
+ */
+const VIEWPORT = 500;
 
 function Probe({
   items,
@@ -45,8 +54,21 @@ function Probe({
     onNearEnd,
     windowKey,
   });
-  return <div ref={scrollRef} />;
+  return (
+    <div
+      ref={(el) => {
+        if (el && el.clientHeight !== VIEWPORT) {
+          Object.defineProperty(el, "clientHeight", { value: VIEWPORT });
+        }
+        (scrollRef as React.MutableRefObject<HTMLDivElement | null>).current =
+          el;
+      }}
+    />
+  );
 }
+
+/** A list far longer than the viewport — the pixel rule must say "no" for this one. */
+const MANY: Item[] = Array.from({ length: 400 }, (_, i) => ({ id: `x${i}` }));
 
 let container: HTMLDivElement;
 let root: Root;
@@ -124,11 +146,44 @@ describe("useItemWindow re-arm", () => {
       afterFirstPage + 1,
     );
 
-    // …and STOP once something is displayable and the viewport is not near its end.
-    // jsdom reports every element as 0×0, so `remainingPx` cannot be exercised here; what
-    // this pins is that the empty-list branch is what did the asking above.
+    // …and STOP once a screenful is displayable. This is the half that has to discriminate:
+    // with the old `items.length > 0` guard restored, the empty renders above ask ZERO times
+    // and those assertions fail; without a real viewport, this one could never fail at all.
     const before = calls;
-    render(ITEMS, 3);
-    expect(calls, "one ask for the arriving page, not a chain").toBe(before + 1);
+    render(MANY, 3);
+    expect(calls, "a full list far from its end must not ask at all").toBe(
+      before,
+    );
+  });
+
+  it("stops looking after MAX_EMPTY_EXTENSIONS, and resets once refilled", () => {
+    // Three surfaces share this hook AND the window: an empty `ContinuousDetailStream` on a
+    // quiet camera would otherwise walk the shared window to the ~31-day floor on its own,
+    // spending a dozen `/review` pages nobody asked for.
+    let calls = 0;
+    const render = (items: Item[], windowKey: number) =>
+      act(() => {
+        root.render(
+          <Probe
+            items={items}
+            windowKey={windowKey}
+            onNearEnd={() => calls++}
+          />,
+        );
+      });
+
+    for (let i = 0; i < MAX_EMPTY_EXTENSIONS + 4; i++) render([], i + 1);
+    expect(calls, "bounded, not one page per arriving page for ever").toBe(
+      MAX_EMPTY_EXTENSIONS,
+    );
+
+    // something to show → the budget is restored for the next time it empties (a filter
+    // change, a severity switch), because that is a new search, not a continuation
+    render(MANY, 99);
+    const afterRefill = calls;
+    for (let i = 0; i < MAX_EMPTY_EXTENSIONS + 2; i++) render([], 200 + i);
+    expect(calls, "the budget resets once the surface has been refilled").toBe(
+      afterRefill + MAX_EMPTY_EXTENSIONS,
+    );
   });
 });

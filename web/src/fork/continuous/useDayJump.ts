@@ -20,7 +20,7 @@
  * upstream's filter path unchanged — that is what keeps the toggle a real rollback.
  */
 import { useCallback, useMemo } from "react";
-import { useContinuous } from "./ContinuousProvider";
+import { useContinuousNav } from "./ContinuousProvider";
 import { dayStartFromPickedDate } from "./dayNav";
 
 export type DayJump = {
@@ -35,7 +35,10 @@ export type DayJump = {
 };
 
 export function useContinuousDayJump(): DayJump {
-  const ctx = useContinuous();
+  // The NARROW context, not the whole provider value: these two callers are upstream
+  // components mounted on both pages, and subscribing them to everything re-rendered them at
+  // playhead rate for a button label. See `ContinuousNavValue`.
+  const ctx = useContinuousNav();
 
   const jump = useCallback(
     (day?: Date) => {

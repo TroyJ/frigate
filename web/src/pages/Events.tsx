@@ -368,6 +368,15 @@ export default function Events() {
   // scrubber at the review, and hands the provider a TIMESTAMP to navigate to — nothing
   // here writes `{after, before}`, which is what keeps the window continuous under a link
   // (§17.7 #11: you must be able to keep scrolling back from where it dropped you).
+  const firstConfiguredCamera = useMemo(() => {
+    if (!config) return undefined;
+    return Object.keys(config.cameras).sort(
+      (a, b) =>
+        (config.cameras[a]?.ui?.order ?? 0) -
+        (config.cameras[b]?.ui?.order ?? 0),
+    )[0];
+  }, [config]);
+
   const oldestRecording = useMemo(() => {
     if (!recordingsSummary || !timezone) return undefined;
     const days = Object.keys(recordingsSummary).sort();
@@ -387,9 +396,14 @@ export default function Events() {
         true,
       ),
     revealOnReviewPage,
-    cameraForMoment:
-      reviewFilter?.cameras?.[0] ??
-      (config ? Object.keys(config.cameras)[0] : undefined),
+    // §2A.4: `tab` is contract on its own, not only alongside `id` (this is the state
+    // upstream's own `useSearchEffect("tab")` set, and the fork owns the param now).
+    onTab: setNotificationTab,
+    // A bare `?t=` still has to open SOME camera — the History scrubber is per-camera.
+    // Prefer one the link's own filters named, else the first configured camera in ui order,
+    // which is how upstream picks a default elsewhere. Undefined only on a camera-less
+    // config (or before it loads), which the handler reports rather than guessing.
+    cameraForMoment: reviewFilter?.cameras?.[0] ?? firstConfiguredCamera,
     oldestRecording,
   });
 

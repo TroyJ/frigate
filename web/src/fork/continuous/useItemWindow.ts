@@ -38,6 +38,15 @@ const LOOKAHEAD_VIEWPORTS = 1;
 /** Before layout `clientHeight` is 0; without a floor, an empty list would never extend. */
 const MIN_LOOKAHEAD_PX = 400;
 export const STICK_THRESHOLD_PX = 24;
+/**
+ * How many extensions an EMPTY surface may spend looking for something to show.
+ *
+ * Four 72 h pages is ~12 days of history, which covers the case this exists for — the box's
+ * recent days are all reviewed and the nearest unreviewed alert is a few days back (measured
+ * on 2026-08-27: two pages were enough) — while keeping a permanently-empty surface from
+ * chaining to the review floor. The budget resets the moment anything is displayable.
+ */
+export const MAX_EMPTY_EXTENSIONS = 4;
 
 export function useItemWindow<T extends { id: string }>(params: {
   scrollRef: RefObject<HTMLDivElement>;
@@ -82,6 +91,15 @@ export function useItemWindow<T extends { id: string }>(params: {
     lanes,
     getItemKey: (i) => items[i]?.id ?? i,
   });
+
+  /** Extensions spent while this surface had nothing to display — see `nearEnd`. */
+  const emptyExtensions = useRef(0);
+  if (items.length > 0 && emptyExtensions.current !== 0) {
+    // Reset during render, deliberately: `nearEnd` is computed during render too, so a
+    // budget reset that waited for an effect would leave one stale render deciding not to
+    // extend on a surface that has just been refilled (a filter change, say).
+    emptyExtensions.current = 0;
+  }
 
   /**
    * §9.2 — keep what the user is looking at exactly where it is.
@@ -238,7 +256,7 @@ export function useItemWindow<T extends { id: string }>(params: {
   const remainingPx =
     virtualizer.getTotalSize() - (virtualizer.scrollOffset ?? 0) - viewport;
   /**
-   * An EMPTY surface always asks for more, whatever the scroll position says.
+   * An EMPTY surface asks for more, whatever the scroll position says — but only so far.
    *
    * This used to be `items.length > 0 && …`, and that guard turned the most ordinary state
    * on the box into a dead page: the Review grid hides reviewed items by default, so once
@@ -249,14 +267,19 @@ export function useItemWindow<T extends { id: string }>(params: {
    * the live box with 420 unreviewed alerts two days back: "There are no alerts to review",
    * `.review-item` count 0, and not one further `/review` page requested.
    *
-   * There is no runaway here, for two reasons that the earlier feedback-loop failures did
-   * not have: it stops the moment ONE item is displayable, and `loadOlder` is a no-op at the
-   * data floor, so a genuinely empty history terminates instead of chaining. "Load until you
-   * can show me something, then stop" is the whole rule.
+   * The CAP is the other half, and it is not optional: three surfaces share this hook and
+   * they share ONE window. `ContinuousDetailStream` on a quiet camera, or the events list
+   * with everything filtered out, is legitimately empty for days — and without a bound it
+   * would walk the shared window to the ~31-day floor on its own, spending a dozen `/review`
+   * pages that nobody asked for. That is the runaway this file already has one rule against
+   * (see LOOKAHEAD_VIEWPORTS). "Look a few pages back for something to show, then stop and
+   * let the user ask" is the whole rule; the budget resets as soon as anything is displayed.
    */
   const nearEnd =
-    items.length === 0 ||
-    remainingPx <= Math.max(viewport * LOOKAHEAD_VIEWPORTS, MIN_LOOKAHEAD_PX);
+    items.length === 0
+      ? emptyExtensions.current < MAX_EMPTY_EXTENSIONS
+      : remainingPx <=
+        Math.max(viewport * LOOKAHEAD_VIEWPORTS, MIN_LOOKAHEAD_PX);
   // The callback is held in a REF and kept out of the deps on purpose. Callers build it
   // from the context object (`() => ctx.loadOlder()`), whose identity changes on every
   // provider render — with it in the deps this effect re-ran on provider state that has
@@ -266,7 +289,9 @@ export function useItemWindow<T extends { id: string }>(params: {
   const onNearEndRef = useRef(onNearEnd);
   onNearEndRef.current = onNearEnd;
   useEffect(() => {
-    if (nearEnd) onNearEndRef.current?.();
+    if (!nearEnd) return;
+    if (items.length === 0) emptyExtensions.current += 1;
+    onNearEndRef.current?.();
   }, [nearEnd, items.length, windowKey]);
 
   const scrollToId = useCallback(
