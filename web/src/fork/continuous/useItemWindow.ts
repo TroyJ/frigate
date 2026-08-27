@@ -237,8 +237,25 @@ export function useItemWindow<T extends { id: string }>(params: {
   const viewport = scrollRef.current?.clientHeight ?? 0;
   const remainingPx =
     virtualizer.getTotalSize() - (virtualizer.scrollOffset ?? 0) - viewport;
+  /**
+   * An EMPTY surface always asks for more, whatever the scroll position says.
+   *
+   * This used to be `items.length > 0 && …`, and that guard turned the most ordinary state
+   * on the box into a dead page: the Review grid hides reviewed items by default, so once
+   * you have cleared today's alerts — which is what the "Mark these items as reviewed"
+   * button is for, and what anyone keeping up with their alerts does daily — the initial
+   * 24 h window contains NOTHING to display. With nothing displayed there is no scroll, with
+   * no scroll `nearEnd` never became true, and the window sat at 24 h for ever. Measured on
+   * the live box with 420 unreviewed alerts two days back: "There are no alerts to review",
+   * `.review-item` count 0, and not one further `/review` page requested.
+   *
+   * There is no runaway here, for two reasons that the earlier feedback-loop failures did
+   * not have: it stops the moment ONE item is displayable, and `loadOlder` is a no-op at the
+   * data floor, so a genuinely empty history terminates instead of chaining. "Load until you
+   * can show me something, then stop" is the whole rule.
+   */
   const nearEnd =
-    items.length > 0 &&
+    items.length === 0 ||
     remainingPx <= Math.max(viewport * LOOKAHEAD_VIEWPORTS, MIN_LOOKAHEAD_PX);
   // The callback is held in a REF and kept out of the deps on purpose. Callers build it
   // from the context object (`() => ctx.loadOlder()`), whose identity changes on every

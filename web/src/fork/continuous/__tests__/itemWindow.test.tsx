@@ -97,4 +97,38 @@ describe("useItemWindow re-arm", () => {
       afterFirst + 1,
     );
   });
+
+  it("an EMPTY surface keeps asking — the cleared-alerts dead page", () => {
+    // The Review grid hides reviewed items, so the day after you clear your alerts the
+    // initial 24 h window holds nothing to display. With `items.length > 0` guarding the
+    // trigger there was no scroll, no `nearEnd`, and no further page: measured on the box as
+    // "There are no alerts to review" with 420 unreviewed alerts two days back.
+    let calls = 0;
+    const render = (items: Item[], windowKey: number) =>
+      act(() => {
+        root.render(
+          <Probe
+            items={items}
+            windowKey={windowKey}
+            onNearEnd={() => calls++}
+          />,
+        );
+      });
+
+    render([], 1);
+    expect(calls, "nothing to show — it must go looking").toBeGreaterThan(0);
+
+    const afterFirstPage = calls;
+    render([], 2); // another page landed, still nothing displayable
+    expect(calls, "and keep looking while it still has nothing").toBe(
+      afterFirstPage + 1,
+    );
+
+    // …and STOP once something is displayable and the viewport is not near its end.
+    // jsdom reports every element as 0×0, so `remainingPx` cannot be exercised here; what
+    // this pins is that the empty-list branch is what did the asking above.
+    const before = calls;
+    render(ITEMS, 3);
+    expect(calls, "one ask for the arriving page, not a chain").toBe(before + 1);
+  });
 });
