@@ -44,6 +44,13 @@ import { denseStripTarget } from "./navigation";
 import { buildGapIndex, GAP_PRESENTATION } from "./gapIndex";
 import { effectiveScaleDuration } from "./zoomPin";
 
+/**
+ * How far the viewport must move before the panel is told (D24). One hour is two orders of
+ * magnitude finer than the three-day pin it feeds and coarse enough that a scroll does not
+ * re-render the panel per row.
+ */
+const VIEWPORT_REPORT_EPSILON_S = 3600;
+
 /** A gap run has to be at least this many rows before it gets a text badge (see renderRow). */
 const GAP_RUN_LABEL_ROWS = 8;
 
@@ -159,9 +166,21 @@ export function ContinuousMotionStrip({
     };
   }, [win.visible, startAligned, segmentDuration]);
   // D24: tell the panel how deep the viewport is, so it can pin the zoom controls.
+  // THRESHOLDED, not per row: `visibleRange` changes on every scrolled row (8 px), and the
+  // panel turns each report into state, so an unthrottled version re-renders the whole
+  // History panel at scroll rate to answer a question whose granularity is three DAYS.
+  const lastReported = useRef<number>();
   useEffect(() => {
     if (!onViewportChange || visibleRange === undefined) return;
-    onViewportChange(visibleRange.after);
+    const t = visibleRange.after;
+    if (
+      lastReported.current !== undefined &&
+      Math.abs(lastReported.current - t) < VIEWPORT_REPORT_EPSILON_S
+    ) {
+      return;
+    }
+    lastReported.current = t;
+    onViewportChange(t);
   }, [onViewportChange, visibleRange]);
 
   // D24: the scale the PAGES are requested at, which is not necessarily the pitch the strip
@@ -323,6 +342,10 @@ export function ContinuousMotionStrip({
           // this row IS its own presentation (there is no cell under it), so it carries the
           // overlay marker too — that attribute is what a gate reads the three appearances off
           data-gap-overlay="unknown"
+          // …and its TIME, like every other row: `data-segment-id` lives on the copied
+          // MotionSegment, which a shimmer row does not render, so without this the strip
+          // has no readable time axis at all while gap data is in flight
+          data-segment-time={segmentTime}
           title={label}
           aria-label={label}
           className={className}
@@ -361,6 +384,7 @@ export function ContinuousMotionStrip({
         // always present, including "available": a self-describing row is what lets a gate
         // assert that a recorded stretch is NOT wearing either blackout
         data-gap-reason={gapState}
+        data-segment-time={segmentTime}
         title={gap?.label}
         aria-label={gap?.label}
       >

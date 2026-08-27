@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   clampExportRange,
   movedHandle,
+  movedHandleFromState,
   MAX_EXPORT_SPAN_S,
 } from "../exportClamp";
 import {
   effectiveScaleDuration,
   isZoomPinned,
+  offeredZoomLevels,
+  zoomChangeAllowed,
   PINNED_SEGMENT_DURATION,
   PIN_ZOOM_BEYOND_S,
 } from "../zoomPin";
@@ -67,6 +70,36 @@ describe("movedHandle", () => {
   it("treats the seeding frame as a start drag", () => {
     expect(movedHandle(undefined, { after: 10, before: 200 })).toBe("after");
   });
+
+  it("reads the FIRST drag off the handle state, not off a previous range (M5)", () => {
+    // exportEnd set, exportStart still 0 => the END handle moved, whatever the (absent)
+    // previous applied range would have implied
+    expect(
+      movedHandleFromState(0, 900, undefined, { after: 100, before: 900 }),
+    ).toBe("before");
+    expect(
+      movedHandleFromState(100, 0, undefined, { after: 100, before: 900 }),
+    ).toBe("after");
+  });
+
+  it("negative control: the old rule anchors the wrong handle on a first END drag", () => {
+    // this is the defect — `movedHandle` alone answers "after", so the clamp would pull the
+    // START handle (the anchor) instead of trimming the end the user is dragging
+    expect(movedHandle(undefined, { after: 100, before: 900 })).toBe("after");
+    const wrong = clampExportRange(
+      { after: NOW - 40 * 86400, before: NOW },
+      movedHandle(undefined, { after: NOW - 40 * 86400, before: NOW }),
+    );
+    const right = clampExportRange(
+      { after: NOW - 40 * 86400, before: NOW },
+      movedHandleFromState(0, NOW, undefined, {
+        after: NOW - 40 * 86400,
+        before: NOW,
+      }),
+    );
+    expect(wrong.range.after).not.toBe(right.range.after);
+    expect(right.range.after).toBe(NOW - 40 * 86400); // the anchor did NOT move
+  });
 });
 
 describe("zoom pinning (D24)", () => {
@@ -87,18 +120,41 @@ describe("zoom pinning (D24)", () => {
     expect(effectiveScaleDuration(60, deep, NOW)).toBe(60);
   });
 
-  it("leaves exactly one level offerable past the pin — which is how the button disables", () => {
-    // the panel truncates `possibleZoomLevels` rather than carrying a second allow-list;
-    // upstream then disables its own zoom-in button at the end of the list
-    const levels = [
+  const LEVELS = [
+    { segmentDuration: 30 },
+    { segmentDuration: 15 },
+    { segmentDuration: 5 },
+  ];
+
+  it("offers only the pinned pitch past the pin — which is what disables the button", () => {
+    expect(offeredZoomLevels(LEVELS, 30, true)).toEqual([
       { segmentDuration: 30 },
-      { segmentDuration: 15 },
-      { segmentDuration: 5 },
-    ];
-    const allowed = levels.filter(
-      (l) => l.segmentDuration >= PINNED_SEGMENT_DURATION,
-    );
-    expect(allowed).toHaveLength(1);
-    expect(allowed[0].segmentDuration).toBe(PINNED_SEGMENT_DURATION);
+    ]);
+    // index 0 of a one-entry list is also the LAST entry, which is upstream's own
+    // disabled condition for zoom-in
+    expect(offeredZoomLevels(LEVELS, 30, false)).toEqual(LEVELS);
+  });
+
+  it("keeps the FULL list for someone already finer than the pin", () => {
+    // truncating would drop their current level, `currentZoomLevel` goes to -1 and upstream
+    // hides the whole control
+    expect(offeredZoomLevels(LEVELS, 5, true)).toEqual(LEVELS);
+  });
+
+  it("refuses to get finer past the pin", () => {
+    expect(zoomChangeAllowed(30, 15, true)).toBe(false);
+    expect(zoomChangeAllowed(30, 5, true)).toBe(false);
+  });
+
+  it("ALWAYS allows coarsening past the pin — the trap this closes", () => {
+    // a user already at 5 s must be able to zoom out; rejecting every level below the pin
+    // left the enabled zoom-out button silently dead
+    expect(zoomChangeAllowed(5, 15, true)).toBe(true);
+    expect(zoomChangeAllowed(5, 30, true)).toBe(true);
+    expect(zoomChangeAllowed(15, 30, true)).toBe(true);
+  });
+
+  it("allows anything inside the pin", () => {
+    expect(zoomChangeAllowed(30, 5, false)).toBe(true);
   });
 });

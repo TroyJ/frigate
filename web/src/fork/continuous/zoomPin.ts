@@ -58,6 +58,54 @@ export function effectiveScaleDuration(
   return Math.max(segmentDuration, PINNED_SEGMENT_DURATION);
 }
 
+export type ZoomLevelLike = { segmentDuration: number };
+
+/**
+ * The levels the zoom control should OFFER, and whether a requested one is allowed.
+ *
+ * Both live here rather than inline in the panel so the rule is testable and there is one
+ * statement of it. Two things it has to get right, and the second was a real defect:
+ *
+ *  - past the pin, only the pinned pitch and coarser are offered. Upstream disables its own
+ *    zoom-in button at the end of `possibleZoomLevels`, so truncating the list IS the
+ *    "renders disabled" half of D24, with no upstream change.
+ *  - a user who was ALREADY finer than the pin when they scrolled deep must keep the full
+ *    list, or their current level falls off it, `currentZoomLevel` goes to −1 and upstream
+ *    hides the control entirely.
+ */
+export function offeredZoomLevels<T extends ZoomLevelLike>(
+  levels: T[],
+  currentSegmentDuration: number,
+  pinned: boolean,
+): T[] {
+  if (!pinned) return levels;
+  const allowed = levels.filter(
+    (l) => l.segmentDuration >= PINNED_SEGMENT_DURATION,
+  );
+  return allowed.some((l) => l.segmentDuration === currentSegmentDuration)
+    ? allowed
+    : levels;
+}
+
+/**
+ * May the strip move to `next` from `current`?
+ *
+ * Past the pin the answer is no for anything FINER than the pin — but only when it is also
+ * finer than where the user already is. Rejecting every level below the pin traps someone
+ * who was at 5 s when they scrolled deep: the zoom-OUT button is enabled (they are not at
+ * index 0) and silently does nothing, which is worse than not offering it. Coarsening is
+ * always allowed; it is the direction the pin wants.
+ */
+export function zoomChangeAllowed(
+  currentSegmentDuration: number,
+  nextSegmentDuration: number,
+  pinned: boolean,
+): boolean {
+  if (!pinned) return true;
+  const finer = nextSegmentDuration < currentSegmentDuration;
+  return !(finer && nextSegmentDuration < PINNED_SEGMENT_DURATION);
+}
+
 /**
  * There is deliberately no `disabledZoomLevels()` helper here.
  *

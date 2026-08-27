@@ -69,6 +69,27 @@ export function clampExportRange(
  * edge is then treated as the moved one, which is also the edge a user drags first (you
  * drag BACK from the playhead to bracket footage that has already happened).
  */
+/**
+ * Which handle moved, from the handle STATE rather than from a diff against a previous
+ * applied range.
+ *
+ * `movedHandle(undefined, …)` answers "after", so on the very first drag of the END handle
+ * the clamp anchored on the end and pulled the START handle to it — the anchor teleported,
+ * which is exactly what `clampExportRange`'s contract forbids. Upstream sets each handle's
+ * time only when that handle is dragged, so "the other one is still 0" is the reliable
+ * signal and it is available on the first frame.
+ */
+export function movedHandleFromState(
+  exportStart: number,
+  exportEnd: number,
+  previous: TimeRange | undefined,
+  next: TimeRange,
+): "after" | "before" {
+  if (exportStart === 0 && exportEnd !== 0) return "before";
+  if (exportEnd === 0 && exportStart !== 0) return "after";
+  return movedHandle(previous, next);
+}
+
 export function movedHandle(
   previous: TimeRange | undefined,
   next: TimeRange,

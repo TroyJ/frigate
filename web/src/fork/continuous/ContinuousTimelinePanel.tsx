@@ -42,12 +42,13 @@ import { ContinuousNewChip } from "./ContinuousNewChip";
 import { useContinuousStrict } from "./ContinuousProvider";
 import {
   clampExportRange,
-  movedHandle,
+  movedHandleFromState,
   EXPORT_CLAMP_TEXT,
 } from "./exportClamp";
 import {
   isZoomPinned,
-  PINNED_SEGMENT_DURATION,
+  offeredZoomLevels,
+  zoomChangeAllowed,
   ZOOM_PINNED_TEXT,
 } from "./zoomPin";
 
@@ -142,27 +143,28 @@ export function ContinuousTimelinePanel({
    * cheaper by hiding the buttons anyway; the request-scale pin in the strip has already
    * capped what that costs the box.
    */
-  const zoomLevels = useMemo(() => {
-    if (!pinned) return ZOOM_LEVELS;
-    const allowed = ZOOM_LEVELS.filter(
-      (l) => l.segmentDuration >= PINNED_SEGMENT_DURATION,
-    );
-    return allowed.some(
-      (l) => l.segmentDuration === zoomSettings.segmentDuration,
-    )
-      ? allowed
-      : ZOOM_LEVELS;
-  }, [pinned, zoomSettings.segmentDuration]);
+  const zoomLevels = useMemo(
+    () => offeredZoomLevels(ZOOM_LEVELS, zoomSettings.segmentDuration, pinned),
+    [pinned, zoomSettings.segmentDuration],
+  );
   const handleZoomChange = useCallback(
     (i: number) => {
       const level = zoomLevels[i];
       if (!level) return;
-      // belt and braces: the wheel-zoom hook drives this too, and it does not read the
-      // disabled state off the buttons
-      if (pinned && level.segmentDuration < PINNED_SEGMENT_DURATION) return;
+      // belt and braces: the wheel-zoom hook drives this too and does not read the disabled
+      // state off the buttons
+      if (
+        !zoomChangeAllowed(
+          zoomSettings.segmentDuration,
+          level.segmentDuration,
+          pinned,
+        )
+      ) {
+        return;
+      }
       setZoomSettings(level);
     },
-    [zoomLevels, pinned],
+    [zoomLevels, pinned, zoomSettings.segmentDuration],
   );
   const currentZoomLevel = zoomLevels.findIndex(
     (l) => l.segmentDuration === zoomSettings.segmentDuration,
@@ -191,6 +193,17 @@ export function ContinuousTimelinePanel({
      */
     const exportStartTime = exportStart || exportRange.after;
     const exportEndTime = exportEnd || exportRange.before;
+    // Which handle moved, decided from WHICH ONE HAS A VALUE — not from a comparison
+    // against a previous applied range, which does not exist on the first drag.
+    // `movedHandle(undefined, …)` answers "after", so the very first drag of the END handle
+    // clamped by moving the START one: the anchor teleported, which is precisely what
+    // `clampExportRange`'s contract forbids.
+    const moved = movedHandleFromState(
+      exportStart,
+      exportEnd,
+      lastAppliedExport.current,
+      { after: exportStartTime, before: exportEndTime },
+    );
     if (
       exportStartTime !== exportRange.after ||
       exportEndTime !== exportRange.before
@@ -203,10 +216,7 @@ export function ContinuousTimelinePanel({
       // `frigate/api/export.py`, which happily queries every Recordings row in range and
       // starts an ffmpeg job that can occupy the Pi for hours and fill the disk.
       const requested = { after: exportStartTime, before: exportEndTime };
-      const { range, clamped } = clampExportRange(
-        requested,
-        movedHandle(lastAppliedExport.current, requested),
-      );
+      const { range, clamped } = clampExportRange(requested, moved);
       lastAppliedExport.current = range;
       setExportClamped(clamped ? range : undefined);
       setExportRange(range);
