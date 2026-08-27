@@ -32,6 +32,12 @@ export type HeavyPage = {
    * long as the concurrency-1 queue took to refill them.
    */
   stale?: boolean;
+  /**
+   * The `before` actually REQUESTED, which for the page containing now is clamped to the
+   * current second. `mergeHeavy` reports this as the loaded extent so the gap classifier
+   * does not claim knowledge of a future that has not happened.
+   */
+  loadedBefore?: number;
 };
 
 /**
@@ -117,6 +123,28 @@ export function groupByCamera(
 }
 
 /** Concatenate heavy pages newest-first into flat arrays (order is irrelevant to the cells). */
+/**
+ * Retire the placeholder an ABORTED page left behind.
+ *
+ * Split out of `useHeavyPages` so the invariant is testable, because getting it wrong is
+ * silent and permanent: `mergeHeavy` only emits `done` pages, so a page stuck at `loading`
+ * never contributes to `loaded`, the strip shows a skeleton over that whole day for ever,
+ * and the re-request guard (`existing && !existing.stale`) refuses to try again. The cache
+ * is module-level, so it outlives the component too.
+ *
+ * Returns true when something was removed (the caller must re-render).
+ */
+export function dropAbortedPage(
+  pages: Map<number, HeavyPage>,
+  after: number,
+): boolean {
+  const page = pages.get(after);
+  // only the placeholder: a page that already has DATA must survive an aborted refresh
+  if (!page || page.status !== "loading") return false;
+  pages.delete(after);
+  return true;
+}
+
 export function mergeHeavy(pages: Iterable<HeavyPage>): {
   motion: MotionData[];
   unavailable: RecordingSegment[];
@@ -127,7 +155,11 @@ export function mergeHeavy(pages: Iterable<HeavyPage>): {
   const loaded: { after: number; before: number }[] = [];
   for (const p of pages) {
     if (p.status !== "done") continue;
-    loaded.push({ after: p.after, before: p.before });
+    // The page containing NOW is fetched with `before` clamped to the current second
+    // (`useHeavyPages`), so claiming the whole nominal page as loaded asserts knowledge of
+    // gap data for a future that has not happened yet. `loadedBefore` carries what was
+    // actually asked for; `before` stays the page's own bound for identity and eviction.
+    loaded.push({ after: p.after, before: p.loadedBefore ?? p.before });
     for (const m of p.motion) motion.push(m);
     for (const u of p.unavailable) unavailable.push(u);
   }

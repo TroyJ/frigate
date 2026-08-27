@@ -23,7 +23,7 @@ import axios from "axios";
 import { MotionData } from "@/types/review";
 import { RecordingSegment } from "@/types/record";
 import { FetchQueue, isAbort } from "./fetchQueue";
-import { HeavyPage, mergeHeavy } from "./store";
+import { dropAbortedPage, HeavyPage, mergeHeavy } from "./store";
 import { pagesFor } from "./timeAlign";
 
 export const HEAVY_PAGE_HOURS = 24;
@@ -219,6 +219,8 @@ export function useHeavyPages(params: {
           pages.set(p.after, {
             after: p.after,
             before: p.before,
+            // what was actually asked for — the live page is clamped to `now`
+            loadedBefore: before,
             status: "done",
             motion,
             unavailable,
@@ -234,9 +236,28 @@ export function useHeavyPages(params: {
           rerender();
         })
         .catch((e) => {
-          if (isAbort(e)) return;
-          // a failed SHADOW refresh must not blank what is already on screen
+          // `pages` here is the map for the family this job was enqueued UNDER, which is
+          // the point: by the time an abort lands, `fam` may have moved on.
           const prior = pages.get(p.after);
+          if (isAbort(e)) {
+            /**
+             * An abort must not leave a `loading` placeholder behind, or that page is dead
+             * for the session.
+             *
+             * Three things conspire: `mergeHeavy` only emits `done` pages, so a stuck
+             * placeholder never contributes to `loaded` and the strip shows a permanent
+             * skeleton over that whole day; the re-request guard above is
+             * `existing && !existing.stale`, so a `loading` page is never re-enqueued; and
+             * the abort LOOP that would normally clean up only visits `wantedRef`, which
+             * `cancelPrefix`'s effect has just cleared. The cache is module-level, so it
+             * outlives the component too. And this is the ORDINARY gesture, not an edge
+             * case: `scaleDuration` is derived from the viewport, so every crossing of the
+             * 3-day pin flips the family and cancels its predecessor's queue.
+             */
+            if (dropAbortedPage(pages, p.after)) rerender();
+            return;
+          }
+          // a failed SHADOW refresh must not blank what is already on screen
           if (prior && prior.status === "done") return;
           pages.set(p.after, {
             after: p.after,
