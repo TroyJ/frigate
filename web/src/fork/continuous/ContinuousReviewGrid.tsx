@@ -55,6 +55,13 @@ import { indexAtOrAfter } from "./dayNav";
 import { dedupeMirrors, mirrorMapFromConfig } from "./mirrors";
 import { DegradedReviewCell } from "./cells/DegradedReviewCell";
 
+/**
+ * How long a failed thumbnail stays "dead" before the cell re-probes it. A reaped file
+ * fails again immediately; a transient 502 heals. Long enough not to hammer, short enough
+ * that a card is not wrong for the session.
+ */
+const DEAD_THUMB_TTL_MS = 60_000;
+
 /** Fallback until a row has been measured once (see `rowHeight` below). */
 const CARD_ESTIMATE = 240;
 const GAP = 16;
@@ -124,42 +131,113 @@ export function ContinuousReviewGrid({
   const mirrors = useMemo(() => mirrorMapFromConfig(config), [config]);
   // from the CONTEXT: `useUserPersistence` does not share state between hook instances
   const dedupe = ctx.dedupeMirrors;
-  const items = useMemo(
-    () => (dedupe ? dedupeMirrors(rawItems, mirrors) : rawItems),
-    [rawItems, dedupe, mirrors],
+  const { items, suppressed } = useMemo(() => {
+    if (!dedupe)
+      return { items: rawItems, suppressed: new Map<string, string[]>() };
+    return dedupeMirrors(rawItems, mirrors);
+  }, [rawItems, dedupe, mirrors]);
+
+  /**
+   * M2: marking or deleting a visible card must take its SUPPRESSED TWIN with it.
+   *
+   * Dedup runs downstream of the filter, so hiding one row of a pair is only ever a display
+   * choice — the backend still has both. Mark the visible `entrance_high` row and
+   * `patchReviews` removes it from the list; the `entrance_tele` row it was suppressing then
+   * has no visible source, un-suppresses, and pops back into the grid — as an item the user
+   * has just marked, still unreviewed, and which the server was never told about. From the
+   * reader's side the card refuses to go away.
+   *
+   * So the twin rides along with every gesture the grid initiates: `markWithTwins` for the
+   * single mark (hover / open), `selectWithTwins` for a ctrl-click, which is all the bulk
+   * paths need — `r` and the selection toolbar both post `selectedReviews`.
+   */
+  /**
+   * Ctrl-click selects the suppressed twin too.
+   *
+   * That is all the plumbing the BULK paths need: `r` and the selection toolbar both post
+   * `selectedReviews`, so putting both rows in the selection makes them post both ids with
+   * no change to the seam or to upstream. Only a real selection gesture does this — a plain
+   * click opens a review and must not drag a second row into a selection.
+   */
+  const selectWithTwins = useCallback(
+    (review: ReviewSegment, ctrl: boolean, detail: boolean) => {
+      onSelectReview(review, ctrl, detail);
+      if (!ctrl) return;
+      for (const twinId of suppressed.get(review.id) ?? []) {
+        const twin = rawItems.find((it: ReviewSegment) => it.id === twinId);
+        if (twin) onSelectReview(twin, true, detail);
+      }
+    },
+    [onSelectReview, suppressed, rawItems],
+  );
+
+  /** Mark a card AND whatever mirror row it is standing in for. */
+  const markWithTwins = useCallback(
+    (review: ReviewSegment) => {
+      markItemAsReviewed(review);
+      for (const twinId of suppressed.get(review.id) ?? []) {
+        const twin = rawItems.find((it: ReviewSegment) => it.id === twinId);
+        if (twin) markItemAsReviewed(twin);
+      }
+    },
+    [markItemAsReviewed, suppressed, rawItems],
   );
 
   /**
-   * Thumbnails that 404. `error` does not bubble, and the `<img>` belongs to upstream's
-   * imported cell, so this is a capture-phase listener on the grid container — one
-   * listener for every card, instead of a prop upstream does not have. The set is state
-   * (a re-render must follow) and keyed by review id, so a card that scrolls out and back
-   * under virtualization does not re-probe a URL already known to be gone.
+   * Thumbnails that 404.
+   *
+   * `error` does not bubble and the `<img>` belongs to upstream's imported cell, so this is
+   * a capture-phase listener on the grid container — one listener for every card, instead
+   * of a prop upstream does not have.
+   *
+   * Two things it must NOT do, both learned the hard way:
+   *  - fire for any `<img>` in the card. The cell renders more than the thumbnail, and a
+   *    single failed request for something else would degrade a perfectly good review. The
+   *    failing `src` is matched against the review's own `thumb_path` before it counts.
+   *  - latch for the session. A tunnel 502 or a dropped connection is transient, and a
+   *    permanent downgrade on one bad response is worse than a moment of broken image.
+   *    Entries expire after DEAD_THUMB_TTL_MS so the cell re-probes; a genuinely reaped
+   *    file simply fails again and re-degrades, which costs one request per card per
+   *    minute at most.
    */
-  const [deadThumbs, setDeadThumbs] = useState<ReadonlySet<string>>(
-    () => new Set(),
+  const [deadThumbs, setDeadThumbs] = useState<ReadonlyMap<string, number>>(
+    () => new Map(),
   );
   const gridRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     const el = gridRef.current;
     if (!el) return;
     const onError = (e: Event) => {
-      const target = e.target as HTMLElement | null;
+      const target = e.target as HTMLImageElement | null;
       if (!target || target.tagName !== "IMG") return;
-      const id = target
-        .closest("[data-continuous-id]")
-        ?.getAttribute("data-continuous-id");
-      if (!id) return;
+      const card = target.closest("[data-continuous-id]");
+      const id = card?.getAttribute("data-continuous-id");
+      const thumb = card?.getAttribute("data-continuous-thumb");
+      if (!id || !thumb) return;
+      // the thumbnail, not merely an image inside the card
+      const src = target.getAttribute("src") || "";
+      if (!src.endsWith(thumb)) return;
       setDeadThumbs((prev) => {
-        if (prev.has(id)) return prev;
-        const next = new Set(prev);
-        next.add(id);
+        const next = new Map(prev);
+        next.set(id, Date.now());
         return next;
       });
     };
     el.addEventListener("error", onError, true);
     return () => el.removeEventListener("error", onError, true);
   }, []);
+  // expire entries so a transient failure heals itself
+  useEffect(() => {
+    if (!deadThumbs.size) return;
+    const timer = window.setTimeout(() => {
+      const cutoff = Date.now() - DEAD_THUMB_TTL_MS;
+      setDeadThumbs((prev) => {
+        const next = new Map([...prev].filter(([, at]) => at > cutoff));
+        return next.size === prev.size ? prev : next;
+      });
+    }, DEAD_THUMB_TTL_MS);
+    return () => window.clearTimeout(timer);
+  }, [deadThumbs]);
 
   const [columns, setColumns] = useState(() =>
     columnsForWidth(typeof window === "undefined" ? 1280 : window.innerWidth),
@@ -365,6 +443,11 @@ export function ContinuousReviewGrid({
                   // all", a full row of jump. A card id is stable for the item's life.
                   data-continuous-id={review.id}
                   data-start={review.start_time}
+                  // the thumbnail this card OWNS — the error listener above matches the
+                  // failing `src` against it so an unrelated image cannot degrade the cell
+                  data-continuous-thumb={(review.thumb_path || "")
+                    .split("/")
+                    .pop()}
                   // the deep-link landing, assertable from a gate (the ring is a Tailwind
                   // outline class and "is it highlighted" is not otherwise readable)
                   data-continuous-linked={linked ? "true" : undefined}
@@ -405,11 +488,11 @@ export function ContinuousReviewGrid({
                         review={review}
                         allPreviews={relevantPreviews}
                         timeRange={timeRange}
-                        setReviewed={markItemAsReviewed}
+                        setReviewed={(rev) => markWithTwins(rev)}
                         scrollLock={scrollLock}
                         onTimeUpdate={onPreviewTimeUpdate}
                         onClick={(rev, ctrl, detail) =>
-                          onSelectReview(rev, ctrl, detail)
+                          selectWithTwins(rev, ctrl, detail)
                         }
                       />
                     )}

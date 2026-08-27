@@ -15,6 +15,7 @@ export type { DeepLinkResult } from "./useDeepLink";
 export { useContinuousEnabled } from "./useContinuousEnabled";
 export { useContinuousDayJump } from "./useDayJump";
 export { selectReviewItems } from "./selectReviews";
+export { dedupeMirrors, mirrorMapFromConfig } from "./mirrors";
 export { describeMissingFootage } from "./footage";
 export { dayWindowFor } from "./dayNav";
 export { dayKeyToStartInTz, sameHour } from "./timeAlign";

@@ -11,7 +11,7 @@
  * **Matching is by configuration, not by guesswork.** A row is a mirror only if
  *   - its camera declares `mirror_from` containing the other row's camera, AND
  *   - the two rows have the same severity, AND
- *   - their `start_time`s are within MIRROR_TOLERANCE_S.
+ *   - their `start_time`s are IDENTICAL.
  * The mirroring backend copies the source's `start_time`, so in practice the match is
  * exact — measured byte-identical (`1786636678.713004` on both `entrance_high` and
  * `entrance_tele`), which is also the twin trap the L2 harness has its own note about. The
@@ -25,8 +25,6 @@
  */
 import { ReviewSegment } from "@/types/review";
 import { FrigateConfig } from "@/types/frigateConfig";
-
-export const MIRROR_TOLERANCE_S = 2;
 
 /** camera → the cameras it mirrors FROM (i.e. its rows are copies of theirs). */
 export type MirrorMap = Map<string, string[]>;
@@ -66,8 +64,8 @@ export function hasMirrors(map: MirrorMap): boolean {
  * whose own `entrance_high` twin is hidden by the current filter (reviewed, wrong severity,
  * a label filter) would be dropped because SOME other `entrance_high` row is on the list,
  * and the event then appears nowhere at all. One row per event is the goal; zero is a
- * regression. So the comparison is against the twin, within MIRROR_TOLERANCE_S and the same
- * severity, and a mirror with no visible source is KEPT.
+ * regression. So the comparison is against the twin — identical `start_time`, same severity
+ * — and a mirror with no visible source is KEPT.
  *
  * **Count stability under the live tail, since it is not obvious.** The WS delivers the two
  * rows of a pair in write order, so a lone `entrance_tele` row can be kept and then dropped
@@ -80,11 +78,26 @@ export function hasMirrors(map: MirrorMap): boolean {
  * O(n) over a list already sorted newest-first (D23): equal-ish timestamps are adjacent, so
  * only the run within the tolerance has to be considered.
  */
+export type DedupeResult = {
+  items: ReviewSegment[];
+  /**
+   * Kept review id → the ids it is standing in for.
+   *
+   * Suppression is a DISPLAY choice made downstream of the filter: the backend still has
+   * both rows. Anything that acts on a visible card — mark, delete — has to act on the
+   * hidden one too, or the hidden row un-suppresses the moment its source leaves the list
+   * and pops back as an item the user has just dealt with. The caller needs this map to do
+   * that, which is why dedup returns it rather than just a shorter list.
+   */
+  suppressed: Map<string, string[]>;
+};
+
 export function dedupeMirrors(
   items: ReviewSegment[],
   mirrors: MirrorMap,
-): ReviewSegment[] {
-  if (!mirrors.size || items.length < 2) return items;
+): DedupeResult {
+  const suppressed = new Map<string, string[]>();
+  if (!mirrors.size || items.length < 2) return { items, suppressed };
   const out: ReviewSegment[] = [];
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
@@ -93,29 +106,42 @@ export function dedupeMirrors(
       out.push(item);
       continue;
     }
-    const twin = (j: number) =>
-      Math.abs(items[j].start_time - item.start_time) <= MIRROR_TOLERANCE_S &&
+    // EXACT timestamp equality, not a tolerance. The mirroring backend copies the source's
+    // `start_time`, so real twins are byte-identical (measured: `1786636678.713004` on
+    // both). A ±2 s window bought nothing against that and could cross-match two genuinely
+    // separate events two seconds apart — which loses one of them, the failure this whole
+    // function is written to avoid.
+    const twinOf = (j: number) =>
+      items[j].start_time === item.start_time &&
       items[j].severity === item.severity &&
       sources.includes(items[j].camera);
-    let isMirror = false;
+    let keeper: ReviewSegment | undefined;
     // scan the neighbourhood BOTH ways: which twin leads is not a product property
-    for (let j = i - 1; j >= 0; j--) {
-      if (Math.abs(items[j].start_time - item.start_time) > MIRROR_TOLERANCE_S)
-        break;
-      if (twin(j)) {
-        isMirror = true;
-        break;
-      }
-    }
-    for (let j = i + 1; !isMirror && j < items.length; j++) {
-      if (Math.abs(items[j].start_time - item.start_time) > MIRROR_TOLERANCE_S)
-        break;
-      if (twin(j)) {
-        isMirror = true;
+    for (
+      let j = i - 1;
+      j >= 0 && items[j].start_time === item.start_time;
+      j--
+    ) {
+      if (twinOf(j)) {
+        keeper = items[j];
         break;
       }
     }
-    if (!isMirror) out.push(item);
+    for (
+      let j = i + 1;
+      !keeper && j < items.length && items[j].start_time === item.start_time;
+      j++
+    ) {
+      if (twinOf(j)) {
+        keeper = items[j];
+        break;
+      }
+    }
+    if (!keeper) {
+      out.push(item);
+      continue;
+    }
+    suppressed.set(keeper.id, [...(suppressed.get(keeper.id) ?? []), item.id]);
   }
-  return out;
+  return { items: out, suppressed };
 }

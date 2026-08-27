@@ -42,6 +42,8 @@ import {
   ContinuousDedupToggle,
   ContinuousReviewGrid,
   ContinuousEventStrip,
+  dedupeMirrors,
+  mirrorMapFromConfig,
   ContinuousMotionStrip,
   ContinuousNewChip,
   dayWindowFor,
@@ -129,6 +131,21 @@ export default function EventView({
           )
         : null,
     [continuousReviews, severity, filter?.showAll, showReviewed],
+  );
+  /**
+   * The same list as the grid RENDERS — F19's dedup applied.
+   *
+   * Only "select all" needs it: the grid does its own dedup (it owns the suppression map
+   * that mark/delete rides on), and every other consumer wants the full list.
+   */
+  const mirrorMap = useMemo(() => mirrorMapFromConfig(config), [config]);
+  const dedupeOn = continuous.enabled && continuous.dedupeMirrors;
+  const continuousVisibleItems = useMemo(
+    () =>
+      continuousItems && dedupeOn
+        ? dedupeMirrors(continuousItems, mirrorMap).items
+        : continuousItems,
+    [continuousItems, dedupeOn, mirrorMap],
   );
 
   // fork: upstream's mark-reviewed mutations write into the 24 h `reviews` SWR cache,
@@ -288,7 +305,13 @@ export default function EventView({
   const onSelectAllReviews = useCallback(() => {
     // fork (D18): on a virtualized grid "all" is every LOADED item — the array, not the
     // DOM rows and not the 24 h page. The bulk endpoints take ids, so this is safe.
-    const selectable = continuousItems ?? currentReviewItems;
+    //
+    // F19: "all" also means every loaded CARD, not every loaded ROW. With mirrored alerts
+    // half the rows are suppressed, so selecting the raw list makes the toolbar count twice
+    // what is on screen and makes the select-all/deselect toggle flip at the wrong point.
+    // The hidden twins are added back by `ContinuousReviewGrid` when a gesture acts on the
+    // card that is standing in for them.
+    const selectable = continuousVisibleItems ?? currentReviewItems;
     if (!selectable || selectable.length == 0) {
       return;
     }
@@ -298,7 +321,7 @@ export default function EventView({
     } else {
       setSelectedReviews([]);
     }
-  }, [continuousItems, currentReviewItems, selectedReviews]);
+  }, [continuousVisibleItems, currentReviewItems, selectedReviews]);
 
   const exportReview = useCallback(
     (id: string) => {
@@ -493,7 +516,14 @@ export default function EventView({
             alerts between cameras. Renders nothing anywhere else. Wrapped WITH the filter
             group rather than added beside it: this row is `justify-between`, so a third
             child would push the filters into the middle of the header. */}
-        <div className="flex items-center gap-1">
+        {/* the wrapper exists only to keep the F19 control from becoming a third child of a
+            `justify-between` row; with the toggle OFF there is no control and upstream's
+            layout must be exactly as it was */}
+        <div
+          className={
+            continuous.enabled ? "flex items-center gap-1" : "contents"
+          }
+        >
           {selectedReviews.length <= 0 && <ContinuousDedupToggle />}
           {selectedReviews.length <= 0 ? (
             <ReviewFilterGroup
