@@ -73,9 +73,16 @@ export function ContinuousTimelinePanel({
   const ctx = useContinuousStrict();
   // §9.5: the playback chunk window follows the playhead, and RecordingView owns it.
   const reportPlayhead = ctx.reportPlayhead;
+  // D1: and so does the calendar — in History the day the user is looking at IS the day the
+  // playhead is in. The provider keeps this at day granularity, so reporting it on every
+  // timestamp tick costs one comparison.
+  const reportViewTime = ctx.reportViewTime;
   useEffect(() => {
-    if (currentTime) reportPlayhead(currentTime);
-  }, [currentTime, reportPlayhead]);
+    if (currentTime) {
+      reportPlayhead(currentTime);
+      reportViewTime(currentTime);
+    }
+  }, [currentTime, reportPlayhead, reportViewTime]);
   const internalTimelineRef = useRef<HTMLDivElement>(null);
   const selectedTimelineRef = timelineRef || internalTimelineRef;
 

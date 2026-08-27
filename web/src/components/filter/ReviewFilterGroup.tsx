@@ -26,6 +26,8 @@ import PlatformAwareDialog from "../overlay/dialog/PlatformAwareDialog";
 import { useTranslation } from "react-i18next";
 import { getTranslatedLabel } from "@/utils/i18n";
 import { useAllowedCameras } from "@/hooks/use-allowed-cameras";
+// fork (continuous timeline seam, handover §8.4 / D1): the calendar becomes a navigator
+import { useContinuousDayJump } from "@/fork/continuous";
 
 const REVIEW_FILTERS = [
   "cameras",
@@ -181,15 +183,22 @@ export default function ReviewFilterGroup({
 
   // handle updating filters
 
+  // fork (D1/D14/D15): with the continuous window on, the calendar is a NAVIGATOR, not a
+  // filter — `dayJump.jump()` moves the loaded window to that day and returns true. It
+  // returns false when the toggle is off, and upstream's day filter below then runs exactly
+  // as it always did, which is what keeps the toggle a real rollback.
+  const dayJump = useContinuousDayJump();
+
   const onUpdateSelectedDay = useCallback(
     (day?: Date) => {
+      if (dayJump.jump(day)) return;
       onUpdateFilter({
         ...filter,
         after: day == undefined ? undefined : day.getTime() / 1000,
         before: day == undefined ? undefined : getEndOfDayTimestamp(day),
       });
     },
-    [filter, onUpdateFilter],
+    [filter, onUpdateFilter, dayJump],
   );
 
   return (
@@ -215,10 +224,14 @@ export default function ReviewFilterGroup({
         <CalendarFilterButton
           reviewSummary={reviewSummary}
           recordingsSummary={recordingsSummary}
+          // fork (D1): the selected day FOLLOWS the surface — `filter.after` is the day
+          // filter, which the continuous window does not set, so without this the button
+          // would read "Last 24 hours" while the user is ten days deep in history.
           day={
-            filter?.after == undefined
+            dayJump.day ??
+            (filter?.after == undefined
               ? undefined
-              : new Date(filter.after * 1000)
+              : new Date(filter.after * 1000))
           }
           updateSelectedDay={onUpdateSelectedDay}
         />

@@ -28,7 +28,7 @@
  * comparison `>= t`, and keep the scan running oldest → newest.
  */
 import { ReviewSegment } from "@/types/review";
-import { pagesFor } from "./timeAlign";
+import { dayKeyToStartInTz, pagesFor } from "./timeAlign";
 
 /**
  * Index of the OLDEST item whose `start_time >= t`, for a list sorted newest-first (D23).
@@ -44,6 +44,26 @@ export function indexAtOrAfter(
     if (items[i].start_time >= t) return i;
   }
   return 0;
+}
+
+/**
+ * 00:00 BOX time for the day the user actually clicked in the calendar (D14/D15).
+ *
+ * `ReviewActivityCalendar` renders through `react-day-picker`'s `timeZone` prop, so the
+ * object handed to `onSelect` is a `TZDate` whose `getFullYear/getMonth/getDate` read in the
+ * DISPLAY timezone — while a plain `Date` (any caller that does not pass `timeZone`) reads
+ * in the BROWSER's. Both are handled the same way here: take the Y-M-D the button was
+ * showing and re-resolve it as midnight in `tz`.
+ *
+ * What must NOT be used is `day.getTime() / 1000` (upstream's filter path) — that is
+ * midnight in whichever zone built the object, so a phone in Sydney opening the villa's
+ * calendar asks for a day that starts two hours early and ends two hours early, and the
+ * day's first two hours of review items are on the wrong day. §2A.6 / §13.
+ */
+export function dayStartFromPickedDate(day: Date, tz: string): number {
+  const mm = `0${day.getMonth() + 1}`.slice(-2);
+  const dd = `0${day.getDate()}`.slice(-2);
+  return dayKeyToStartInTz(`${day.getFullYear()}-${mm}-${dd}`, tz);
 }
 
 /**
