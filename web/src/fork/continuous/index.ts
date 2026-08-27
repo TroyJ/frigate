@@ -7,6 +7,8 @@ export type { VisibleReviewRange } from "./ContinuousReviewGrid";
 export { ContinuousEventStrip } from "./ContinuousEventStrip";
 export { ContinuousMotionStrip } from "./ContinuousMotionStrip";
 export { ContinuousNewChip } from "./ContinuousNewChip";
+export { ContinuousOverviewBar } from "./ContinuousOverviewBar";
+export { ContinuousDedupToggle } from "./ContinuousDedupToggle";
 export { ContinuousDeepLinkNotice } from "./ContinuousDeepLinkNotice";
 export { useContinuousDeepLink } from "./useDeepLink";
 export type { DeepLinkResult } from "./useDeepLink";

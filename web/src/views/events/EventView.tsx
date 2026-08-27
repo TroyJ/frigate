@@ -38,6 +38,8 @@ import useSWR from "swr";
 import MotionReviewTimeline from "@/components/timeline/MotionReviewTimeline";
 // fork (continuous timeline seam, handover §8.4 / D4): the three Review-page surfaces
 import {
+  ContinuousOverviewBar,
+  ContinuousDedupToggle,
   ContinuousReviewGrid,
   ContinuousEventStrip,
   ContinuousMotionStrip,
@@ -487,36 +489,43 @@ export default function EventView({
           </ToggleGroupItem>
         </ToggleGroup>
 
-        {selectedReviews.length <= 0 ? (
-          <ReviewFilterGroup
-            filters={
-              severity == "significant_motion"
-                ? ["cameras", "date", "motionOnly"]
-                : ["cameras", "reviewed", "date", "general"]
-            }
-            currentSeverity={severityToggle}
-            reviewSummary={reviewSummary}
-            recordingsSummary={recordingsSummary}
-            filter={filter}
-            motionOnly={motionOnly}
-            filterList={reviewFilterList}
-            showReviewed={showReviewed}
-            setShowReviewed={setShowReviewed}
-            onUpdateFilter={updateFilter}
-            setMotionOnly={setMotionOnly}
-          />
-        ) : (
-          <ReviewActionGroup
-            selectedReviews={selectedReviews}
-            setSelectedReviews={setSelectedReviews}
-            onExport={exportReview}
-            pullLatestData={pullLatestData}
-            onReviewedChange={
-              continuous.enabled ? onToolbarReviewedChange : undefined
-            }
-            onDeleted={continuous.enabled ? onToolbarDeleted : undefined}
-          />
-        )}
+        {/* fork (F19): one row per EVENT rather than one per camera, on boxes that mirror
+            alerts between cameras. Renders nothing anywhere else. Wrapped WITH the filter
+            group rather than added beside it: this row is `justify-between`, so a third
+            child would push the filters into the middle of the header. */}
+        <div className="flex items-center gap-1">
+          {selectedReviews.length <= 0 && <ContinuousDedupToggle />}
+          {selectedReviews.length <= 0 ? (
+            <ReviewFilterGroup
+              filters={
+                severity == "significant_motion"
+                  ? ["cameras", "date", "motionOnly"]
+                  : ["cameras", "reviewed", "date", "general"]
+              }
+              currentSeverity={severityToggle}
+              reviewSummary={reviewSummary}
+              recordingsSummary={recordingsSummary}
+              filter={filter}
+              motionOnly={motionOnly}
+              filterList={reviewFilterList}
+              showReviewed={showReviewed}
+              setShowReviewed={setShowReviewed}
+              onUpdateFilter={updateFilter}
+              setMotionOnly={setMotionOnly}
+            />
+          ) : (
+            <ReviewActionGroup
+              selectedReviews={selectedReviews}
+              setSelectedReviews={setSelectedReviews}
+              onExport={exportReview}
+              pullLatestData={pullLatestData}
+              onReviewedChange={
+                continuous.enabled ? onToolbarReviewedChange : undefined
+              }
+              onDeleted={continuous.enabled ? onToolbarDeleted : undefined}
+            />
+          )}
+        </div>
       </div>
 
       <div className="flex h-full overflow-hidden">
@@ -1070,12 +1079,21 @@ function DetectionReview({
           )}
         </div>
         <div className="w-[10px]">
-          {/* fork: SummaryTimeline is deliberately NOT rendered under the continuous
-              strip. It renders one <SummarySegment> per review over `timelineStart..End`
-              and drives its viewport indicator from that span — at the review floor that
-              is thousands of DOM nodes AND the wrong span, so it would be both slow and
-              lying. A continuous overview bar is its own piece of work (Phase 9). */}
-          {continuous.enabled ? null : loading ? (
+          {/* fork (Phase 9): SummaryTimeline is replaced, not dropped. Upstream's renders
+              one <SummarySegment> per review over `timelineStart..End` — at the review
+              floor that is thousands of DOM nodes AND the wrong span (24 h against a
+              scroller holding a month), so it would be both slow and lying.
+              ContinuousOverviewBar buckets the LOADED window instead: node count bounded by
+              the bar's height, one O(reviews) pass, same drag-and-click interaction. */}
+          {continuous.enabled ? (
+            <ContinuousOverviewBar
+              reviewTimelineRef={reviewTimelineRef}
+              events={continuous.reviews}
+              severityType={severity}
+              newest={continuous.window.newest}
+              oldest={continuous.window.oldest}
+            />
+          ) : loading ? (
             <Skeleton className="w-full" />
           ) : (
             <SummaryTimeline
