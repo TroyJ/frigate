@@ -22,7 +22,13 @@ import {
 } from "@/utils/dateUtil";
 import EventView from "@/views/events/EventView";
 import { RecordingView } from "@/views/recording/RecordingView";
-import { ContinuousProvider } from "@/fork/continuous";
+import {
+  ContinuousDeepLinkNotice,
+  ContinuousProvider,
+  dayKeyToStartInTz,
+  useContinuousDeepLink,
+  useContinuousEnabled,
+} from "@/fork/continuous";
 import axios from "axios";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -57,7 +63,16 @@ export default function Events() {
   const [notificationTab, setNotificationTab] =
     useState<TimelineType>("timeline");
 
+  // fork (D11/§2A): the continuous deep-link handler owns `?id=`/`?t=`/`?tab=`/`?surface=`
+  // when the toggle is on. `continuousLoaded` gates BOTH paths — the toggle is read from
+  // IndexedDB asynchronously, and `useSearchEffect` strips the param the first time its
+  // callback returns true, so consuming it before the answer is known would run upstream's
+  // day-filter path for every deep link on a cold load.
+  const [continuousEnabled, , continuousLoaded] = useContinuousEnabled();
+
   useSearchEffect("tab", (tab: string) => {
+    if (!continuousLoaded) return false;
+    if (continuousEnabled) return false; // handled by useContinuousDeepLink
     if (tab === "timeline" || tab === "events" || tab === "detail") {
       setNotificationTab(tab as TimelineType);
     }
@@ -65,6 +80,13 @@ export default function Events() {
   });
 
   useSearchEffect("id", (reviewId: string) => {
+    if (!continuousLoaded) return false;
+    // fork (D1/D11): upstream's handler works by SETTING THE DAY FILTER, which is the exact
+    // path D1 removes — it would either collapse the continuous window back to one day (so
+    // the user cannot scroll out of where the link dropped them) or be ignored, landing
+    // them at "now" with no explanation. Both are silent. `useContinuousDeepLink` navigates
+    // to a TIMESTAMP instead; see §2A.3.
+    if (continuousEnabled) return false;
     axios
       .get(`review/${reviewId}`)
       .then((resp) => {
@@ -306,6 +328,32 @@ export default function Events() {
     updateSummary();
   }, [updateSummary]);
 
+  // fork (D19): reaching a deep link's target may mean relaxing what the Review page is
+  // showing — the severity tab it is on, and `showReviewed`. Neither touches the provider's
+  // filter key (cameras/labels/zones), so no loaded page is discarded (§14.4). Returns true
+  // when something changed, so the user can be told why the view moved under them.
+  //
+  // `revealReviewed` is a SESSION override, not `setShowReviewed`: that one is
+  // `useUserPersistence`, so writing it would silently change the user's saved default
+  // because they once tapped a notification about an item they had already marked. It is
+  // OR-ed into what EventView is given, and the first deliberate toggle clears it.
+  const [revealReviewed, setRevealReviewed] = useState(false);
+  const revealOnReviewPage = useCallback(
+    (review: ReviewSegment) => {
+      let changed = false;
+      if (review.severity !== (severity ?? "alert")) {
+        setSeverity(review.severity);
+        changed = true;
+      }
+      if (review.has_been_reviewed && !showReviewed) {
+        setRevealReviewed(true);
+        changed = true;
+      }
+      return changed;
+    },
+    [severity, showReviewed, setSeverity],
+  );
+
   // recordings summary
 
   const { data: recordingsSummary } = useSWR<RecordingsSummary>([
@@ -315,6 +363,35 @@ export default function Events() {
       cameras: reviewSearchParams["cameras"] ?? null,
     },
   ]);
+
+  // fork (D11 / §2A.3): the deep-link handler. It resolves `?id=` itself, opens the
+  // scrubber at the review, and hands the provider a TIMESTAMP to navigate to — nothing
+  // here writes `{after, before}`, which is what keeps the window continuous under a link
+  // (§17.7 #11: you must be able to keep scrolling back from where it dropped you).
+  const oldestRecording = useMemo(() => {
+    if (!recordingsSummary || !timezone) return undefined;
+    const days = Object.keys(recordingsSummary).sort();
+    return days.length ? dayKeyToStartInTz(days[0], timezone) : undefined;
+  }, [recordingsSummary, timezone]);
+
+  const deepLink = useContinuousDeepLink({
+    ready: continuousLoaded && continuousEnabled,
+    openRecording: (open) =>
+      setRecording(
+        {
+          camera: open.camera,
+          startTime: open.startTime,
+          severity: open.severity,
+          timelineType: open.tab,
+        },
+        true,
+      ),
+    revealOnReviewPage,
+    cameraForMoment:
+      reviewFilter?.cameras?.[0] ??
+      (config ? Object.keys(config.cameras)[0] : undefined),
+    oldestRecording,
+  });
 
   // preview videos
   const previewTimes = useMemo(() => {
@@ -494,7 +571,16 @@ export default function Events() {
     if (selectedReviewData) {
       return (
         // fork: continuous-timeline provider wraps the scrubber (handover §8.4)
-        <ContinuousProvider filter={reviewSearchParams}>
+        <ContinuousProvider
+          filter={reviewSearchParams}
+          initialNav={deepLink.nav}
+        >
+          {/* fork (§2A.5/D9): a stored link routinely outlives what it points at, and every
+              one of those cases owes the user a sentence rather than a silent landing */}
+          <ContinuousDeepLinkNotice
+            problem={deepLink.problem}
+            onDismiss={deepLink.dismissProblem}
+          />
           <RecordingView
             key={selectedTimeRange.before}
             startCamera={selectedReviewData.camera}
@@ -516,7 +602,11 @@ export default function Events() {
       // fork (D4): the same provider wraps the Review page, so S1/S2/S3 read one window
       // (handover §8.4). Mounted here rather than inside EventView so the loaded pages and
       // scroll depth survive EventView's own remounts.
-      <ContinuousProvider filter={reviewSearchParams}>
+      <ContinuousProvider filter={reviewSearchParams} initialNav={deepLink.nav}>
+        <ContinuousDeepLinkNotice
+          problem={deepLink.problem}
+          onDismiss={deepLink.dismissProblem}
+        />
         <EventView
           reviewItems={reviewItems}
           currentReviewItems={currentItems}
@@ -527,8 +617,12 @@ export default function Events() {
           filter={reviewFilter}
           severity={severity ?? "alert"}
           startTime={startTime}
-          showReviewed={showReviewed ?? false}
-          setShowReviewed={setShowReviewed}
+          // fork (D19): the persisted preference OR the deep link's session-only reveal
+          showReviewed={(showReviewed ?? false) || revealReviewed}
+          setShowReviewed={(show) => {
+            setRevealReviewed(false);
+            setShowReviewed(show);
+          }}
           setSeverity={setSeverity}
           markItemAsReviewed={markItemAsReviewed}
           markAllItemsAsReviewed={markAllItemsAsReviewed}

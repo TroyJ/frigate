@@ -28,7 +28,16 @@ export function classifyMissingFootage(
   return requested < oldestRecording ? "expired" : "outage";
 }
 
-/** English fallbacks; callers pass them as i18n `defaultValue` so other locales degrade sanely. */
+/**
+ * English strings, rendered as-is.
+ *
+ * NOT as an i18n `defaultValue`: upstream installs a `parseMissingKeyHandler`
+ * (`utils/i18n.ts`) that takes precedence over `defaultValue`, so a key with no locale entry
+ * renders as a humanised KEY rather than the fallback — measured on the deep-link notice,
+ * which rendered the literal word "Review-missing" where a sentence belonged. Translating
+ * the fork's strings means adding real entries to the locale bundles, which is upstream
+ * surface and a separate decision.
+ */
 export const MISSING_FOOTAGE_TEXT: Record<MissingFootageReason, string> = {
   expired: "No footage retained for this period",
   outage: "No recording was made during this period",
