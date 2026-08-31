@@ -26,7 +26,12 @@
  * day's end.
  * D9/F15/F17: a review whose camera, config entry or thumbnail has gone is an expected
  * state at depth — the cell degrades, it must never throw, so nothing here dereferences
- * `config.cameras[review.camera]`.
+ * `config.cameras[review.camera]`. It LOOKS it up (Phase 9) and swaps in
+ * `DegradedReviewCell` when the answer is "not there"; a reaped thumbnail is caught by a
+ * capture-phase `error` listener on the row, because `error` does not bubble and the cell
+ * that owns the `<img>` is upstream's.
+ * F19 (Phase 9): mirrored reviews are collapsed here, on S1 only — the strips draw bands,
+ * and two rows with a byte-identical `start_time` occupy the same band either way.
  */
 import {
   MutableRefObject,
@@ -37,14 +42,24 @@ import {
   useRef,
   useState,
 } from "react";
+import useSWR from "swr";
 import { cn } from "@/lib/utils";
 import { Preview } from "@/types/preview";
 import { ReviewSegment } from "@/types/review";
 import { TimeRange } from "@/types/timeline";
+import { FrigateConfig } from "@/types/frigateConfig";
 import PreviewThumbnailPlayer from "@/components/player/PreviewThumbnailPlayer";
 import { useContinuousStrict } from "./ContinuousProvider";
 import { useItemWindow } from "./useItemWindow";
 import { indexAtOrAfter } from "./dayNav";
+import { DegradedReviewCell } from "./cells/DegradedReviewCell";
+
+/**
+ * How long a failed thumbnail stays "dead" before the cell re-probes it. A reaped file
+ * fails again immediately; a transient 502 heals. Long enough not to hammer, short enough
+ * that a card is not wrong for the session.
+ */
+const DEAD_THUMB_TTL_MS = 60_000;
 
 /** Fallback until a row has been measured once (see `rowHeight` below). */
 const CARD_ESTIMATE = 240;
@@ -101,6 +116,86 @@ export function ContinuousReviewGrid({
   onVisibleChange,
 }: ContinuousReviewGridProps) {
   const ctx = useContinuousStrict();
+  const { data: config } = useSWR<FrigateConfig>("config");
+
+  // --- F15 / F17 / F19 depth guards (Phase 9) -----------------------------------------
+  // The config is the ONLY thing that says whether a camera still exists. Read once here
+  // and passed down as a predicate — nothing in the render path indexes into it, so an
+  // absent camera is a value, never a throw.
+  const knownCameras = useMemo(
+    () => new Set(Object.keys(config?.cameras ?? {})),
+    [config],
+  );
+  const configLoaded = config != undefined;
+  /**
+   * F19: the grid RENDERS the deduped list, it does not compute it.
+   *
+   * The seam (EventView) owns dedup, because the seam is where every gesture that ACTS on a
+   * review ends up — the selection is built there, "select all" is there, `markReviewed` is
+   * there. Computing it here as well ran the whole scan twice per render AND left each call
+   * site to remember the suppressed twin on its own, which is exactly how a plain click and
+   * a toolbar Delete ended up covering different halves of the same pair.
+   */
+  /**
+   * Thumbnails that 404.
+   *
+   * `error` does not bubble and the `<img>` belongs to upstream's imported cell, so this is
+   * a capture-phase listener on the grid container — one listener for every card, instead
+   * of a prop upstream does not have.
+   *
+   * Two things it must NOT do, both learned the hard way:
+   *  - fire for any `<img>` in the card. The cell renders more than the thumbnail, and a
+   *    single failed request for something else would degrade a perfectly good review. The
+   *    failing `src` is matched against the review's own `thumb_path` before it counts.
+   *  - latch for the session. A tunnel 502 or a dropped connection is transient, and a
+   *    permanent downgrade on one bad response is worse than a moment of broken image.
+   *    Entries expire after DEAD_THUMB_TTL_MS so the cell re-probes; a genuinely reaped
+   *    file simply fails again and re-degrades, which costs one request per card per
+   *    minute at most.
+   */
+  const [deadThumbs, setDeadThumbs] = useState<ReadonlyMap<string, number>>(
+    () => new Map(),
+  );
+  const gridRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = gridRef.current;
+    if (!el) return;
+    const onError = (e: Event) => {
+      const target = e.target as HTMLImageElement | null;
+      if (!target || target.tagName !== "IMG") return;
+      const card = target.closest("[data-continuous-id]");
+      const id = card?.getAttribute("data-continuous-id");
+      const thumb = card?.getAttribute("data-continuous-thumb");
+      if (!id || !thumb) return;
+      // the thumbnail, not merely an image inside the card
+      const src = target.getAttribute("src") || "";
+      if (!src.endsWith(thumb)) return;
+      setDeadThumbs((prev) => {
+        // Short-circuit if it is already known dead. Without it every retry of the same
+        // broken URL re-identifies the map (a re-render for the whole grid) AND pushes the
+        // TTL out, so a card that fails on a loop would never re-probe — the expiry that
+        // exists to heal a transient failure would be reset by the failure itself.
+        if (prev.has(id)) return prev;
+        const next = new Map(prev);
+        next.set(id, Date.now());
+        return next;
+      });
+    };
+    el.addEventListener("error", onError, true);
+    return () => el.removeEventListener("error", onError, true);
+  }, []);
+  // expire entries so a transient failure heals itself
+  useEffect(() => {
+    if (!deadThumbs.size) return;
+    const timer = window.setTimeout(() => {
+      const cutoff = Date.now() - DEAD_THUMB_TTL_MS;
+      setDeadThumbs((prev) => {
+        const next = new Map([...prev].filter(([, at]) => at > cutoff));
+        return next.size === prev.size ? prev : next;
+      });
+    }, DEAD_THUMB_TTL_MS);
+    return () => window.clearTimeout(timer);
+  }, [deadThumbs]);
 
   const [columns, setColumns] = useState(() =>
     columnsForWidth(typeof window === "undefined" ? 1280 : window.innerWidth),
@@ -271,6 +366,7 @@ export function ContinuousReviewGrid({
 
   return (
     <div
+      ref={gridRef}
       className="relative w-full px-1 md:mx-2"
       style={{ height: `${win.virtualizer.getTotalSize()}px` }}
     >
@@ -305,6 +401,11 @@ export function ContinuousReviewGrid({
                   // all", a full row of jump. A card id is stable for the item's life.
                   data-continuous-id={review.id}
                   data-start={review.start_time}
+                  // the thumbnail this card OWNS — the error listener above matches the
+                  // failing `src` against it so an unrelated image cannot degrade the cell
+                  data-continuous-thumb={(review.thumb_path || "")
+                    .split("/")
+                    .pop()}
                   // the deep-link landing, assertable from a gate (the ring is a Tailwind
                   // outline class and "is it highlighted" is not otherwise readable)
                   data-continuous-linked={linked ? "true" : undefined}
@@ -322,17 +423,37 @@ export function ContinuousReviewGrid({
                   style={{ width: `${100 / columns}%` }}
                 >
                   <div className="aspect-video overflow-hidden rounded-lg">
-                    <PreviewThumbnailPlayer
-                      review={review}
-                      allPreviews={relevantPreviews}
-                      timeRange={timeRange}
-                      setReviewed={markItemAsReviewed}
-                      scrollLock={scrollLock}
-                      onTimeUpdate={onPreviewTimeUpdate}
-                      onClick={(rev, ctrl, detail) =>
-                        onSelectReview(rev, ctrl, detail)
-                      }
-                    />
+                    {/* D9/F15: the camera has left the config. Wait for the config to
+                        actually arrive before judging — `knownCameras` is empty for the
+                        first frames and every card would degrade. */}
+                    {configLoaded && !knownCameras.has(review.camera) ? (
+                      <DegradedReviewCell
+                        review={review}
+                        reason="camera-missing"
+                        tz={ctx.tz}
+                      />
+                    ) : deadThumbs.has(review.id) ? (
+                      /* F17: only the image is gone. The review — and very possibly the
+                         recording — is not, so this stays clickable. */
+                      <DegradedReviewCell
+                        review={review}
+                        reason="thumb-missing"
+                        tz={ctx.tz}
+                        onClick={() => onSelectReview(review, false, false)}
+                      />
+                    ) : (
+                      <PreviewThumbnailPlayer
+                        review={review}
+                        allPreviews={relevantPreviews}
+                        timeRange={timeRange}
+                        setReviewed={markItemAsReviewed}
+                        scrollLock={scrollLock}
+                        onTimeUpdate={onPreviewTimeUpdate}
+                        onClick={(rev, ctrl, detail) =>
+                          onSelectReview(rev, ctrl, detail)
+                        }
+                      />
+                    )}
                   </div>
                   <div
                     className={cn(

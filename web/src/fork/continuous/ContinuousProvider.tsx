@@ -37,6 +37,7 @@ import { TimeRange } from "@/types/timeline";
 import { useTimezone } from "@/hooks/use-date-utils";
 import { useFrigateReviews } from "@/api/ws";
 import { useContinuousEnabled } from "./useContinuousEnabled";
+import { useDedupeMirrors } from "./useDedupeMirrors";
 import { FetchQueue, isAbort } from "./fetchQueue";
 import {
   ReviewPage,
@@ -120,6 +121,16 @@ export type ContinuousFilter = {
 
 export type ContinuousContextValue = {
   enabled: boolean;
+  /**
+   * F19: collapse mirrored reviews on S1 (one row per EVENT, not per camera).
+   *
+   * It lives on the CONTEXT rather than in each component, because `useUserPersistence` is
+   * per-hook-instance state over IndexedDB — two components calling it do not see each
+   * other's writes. Measured: the header toggle flipped its own label and the grid went on
+   * de-duplicating regardless, so the control looked broken while the data was untouched.
+   */
+  dedupeMirrors: boolean;
+  setDedupeMirrors: (v: boolean) => void;
   tz: string;
   /** Tail tick: epoch seconds, advanced every TAIL_TICK_MS while visible. */
   now: number;
@@ -183,7 +194,17 @@ export type ContinuousContextValue = {
   /** Number of items that arrived at the head while the user was not at the top. */
   pendingNew: number;
   clearPendingNew: () => void;
-  extent: { oldestReview?: number; oldestRecording?: number };
+  extent: {
+    oldestReview?: number;
+    oldestRecording?: number;
+    /**
+     * D7's horizon is DAY-resolution for these cameras because their per-camera summary
+     * could not be read. Recorded, not swallowed: the classifier then labels up to 24 h of
+     * ordinarily reaped footage as "camera unavailable", and a silent fallback is how that
+     * bug hid the first time.
+     */
+    horizonDegradedFor?: string[];
+  };
   heavyQueue: FetchQueue;
 };
 
@@ -258,6 +279,7 @@ type Props = {
 
 export function ContinuousProvider({ filter, initialNav, children }: Props) {
   const [enabled, setEnabled, toggleLoaded] = useContinuousEnabled();
+  const [dedupeMirrors, setDedupeMirrors] = useDedupeMirrors();
   const { data: config } = useSWR<FrigateConfig>("config");
   const tz =
     useTimezone(config) ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -298,18 +320,105 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
     "recordings/summary",
     { timezone: tz, cameras: filter.cameras ?? null },
   ]);
+  const recDayKeys = useMemo(
+    () => Object.keys(recordingsSummary ?? {}).sort(),
+    [recordingsSummary],
+  );
+  const horizonCameras = useMemo(() => {
+    const named = (filter.cameras ?? "").split(",").filter(Boolean);
+    return (named.length ? named : Object.keys(config?.cameras ?? {})).sort();
+  }, [filter.cameras, config]);
+
+  /**
+   * The ONE heavy-endpoint queue, concurrency 1 (F12/F21). Declared here rather than beside
+   * its other consumers because the horizon fetch below needs it too, and anything that
+   * touches a scanning endpoint on this box has to go through it.
+   */
+  const heavyQueue = useRef(new FetchQueue(1)).current;
+
+  /**
+   * D7/§14.1a's horizon W, to the HOUR rather than to the day.
+   *
+   * `/recordings/summary` answers in day keys, so deriving W from it puts the
+   * expired-vs-outage boundary at 00:00 of the oldest recorded day — and the free-space
+   * reaper does not stop on a day boundary. Measured on this box: the oldest recording day
+   * is 2026-08-23 and its oldest retained HOUR is 10:00, so ten hours of ordinarily
+   * reaped footage was being labelled "camera unavailable" (and drawn with the alert tint)
+   * on exactly the deepest day a reader looks at. That is asserting a cause we do not have.
+   *
+   * The per-camera summary carries the hours, so one bounded request per camera gets W to
+   * within the hour. Until it lands the day start is used — the weaker, older answer —
+   * rather than blocking the strip.
+   *
+   * **Through `heavyQueue`, one at a time, and never on window focus.** `/{camera}/recordings/summary`
+   * is a full MIN/MAX-plus-Event scan per camera on the Pi, and the API is a single starvable
+   * worker whose stall makes the Supervisor recreate the add-on (F12/F21) — that is exactly
+   * what `fetchQueue.ts`'s own header forbids fanning out. A bare `Promise.all` of one
+   * `axios.get` per camera is that fan-out, and SWR's default `revalidateOnFocus` would
+   * re-fire the whole burst every time the tab is focused, for a value that changes when the
+   * reaper runs. Serialised, and revalidation is off for this key only (a local option, not
+   * a change to upstream's SWR config).
+   */
+  const [horizonDegraded, setHorizonDegraded] = useState<string[]>([]);
+  const { data: horizonBySummary } = useSWR<number | undefined>(
+    recDayKeys.length && horizonCameras.length
+      ? ["fork/recording-horizon", tz, recDayKeys[0], horizonCameras.join(",")]
+      : null,
+    async () => {
+      const dayStart = dayKeyToStartInTz(recDayKeys[0], tz);
+      const failed: string[] = [];
+      const perCamera: (number | undefined)[] = [];
+      for (const cam of horizonCameras) {
+        try {
+          const data = await heavyQueue.enqueue(
+            `horizon:${cam}:${recDayKeys[0]}`,
+            async (signal) => {
+              const res = await axios.get<
+                { day: string; hours: { hour: string }[] }[]
+              >(`${cam}/recordings/summary`, {
+                params: { timezone: tz },
+                signal,
+              });
+              return res.data;
+            },
+            // behind the visible strip's pages: this refines a boundary, it does not draw
+            -1000,
+          );
+          const day = (data ?? []).find((d) => d.day === recDayKeys[0]);
+          const hours = (day?.hours ?? [])
+            .map((h) => parseInt(h.hour, 10))
+            .filter((h) => Number.isFinite(h));
+          perCamera.push(
+            hours.length ? dayStart + Math.min(...hours) * HOUR : undefined,
+          );
+        } catch (e) {
+          // Do NOT swallow this. Falling back to day resolution silently is how M4's
+          // original bug hid: the classifier goes on labelling up to 24 h of reaped footage
+          // as "camera unavailable" and nothing anywhere says the precise answer was never
+          // obtained.
+          if (!isAbort(e)) failed.push(cam);
+          perCamera.push(undefined);
+        }
+      }
+      setHorizonDegraded(failed);
+      const known = perCamera.filter((v): v is number => v !== undefined);
+      return known.length ? Math.min(...known) : undefined;
+    },
+    { revalidateOnFocus: false, revalidateOnReconnect: false },
+  );
+
   const extent = useMemo(() => {
     const days = Object.keys(reviewSummary ?? {})
       .filter((k) => k !== "last24Hours")
       .sort();
-    const recDays = Object.keys(recordingsSummary ?? {}).sort();
     return {
       oldestReview: days.length ? dayKeyToStartInTz(days[0], tz) : undefined,
-      oldestRecording: recDays.length
-        ? dayKeyToStartInTz(recDays[0], tz)
-        : undefined,
+      oldestRecording:
+        horizonBySummary ??
+        (recDayKeys.length ? dayKeyToStartInTz(recDayKeys[0], tz) : undefined),
+      horizonDegradedFor: horizonDegraded.length ? horizonDegraded : undefined,
     };
-  }, [reviewSummary, recordingsSummary, tz]);
+  }, [reviewSummary, recDayKeys, horizonBySummary, horizonDegraded, tz]);
   const floor = useMemo(() => {
     const candidates = [extent.oldestReview, extent.oldestRecording].filter(
       (v): v is number => v !== undefined,
@@ -322,7 +431,6 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
 
   // ---- review pages ----------------------------------------------------------------
   const reviewQueue = useRef(new FetchQueue(2)).current;
-  const heavyQueue = useRef(new FetchQueue(1)).current;
   const [pages, setPages] = useState<Map<number, ReviewPage>>(new Map());
   const [overrides, setOverrides] = useState<Map<string, ReviewSegment>>(
     new Map(),
@@ -941,6 +1049,8 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
   const value = useMemo<ContinuousContextValue>(
     () => ({
       enabled,
+      dedupeMirrors,
+      setDedupeMirrors,
       tz,
       now,
       window: { newest, oldest },
@@ -974,6 +1084,8 @@ export function ContinuousProvider({ filter, initialNav, children }: Props) {
     }),
     [
       enabled,
+      dedupeMirrors,
+      setDedupeMirrors,
       tz,
       now,
       newest,

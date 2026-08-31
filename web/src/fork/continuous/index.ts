@@ -7,12 +7,20 @@ export type { VisibleReviewRange } from "./ContinuousReviewGrid";
 export { ContinuousEventStrip } from "./ContinuousEventStrip";
 export { ContinuousMotionStrip } from "./ContinuousMotionStrip";
 export { ContinuousNewChip } from "./ContinuousNewChip";
+export { ContinuousOverviewBar } from "./ContinuousOverviewBar";
+export { ContinuousDedupToggle } from "./ContinuousDedupToggle";
 export { ContinuousDeepLinkNotice } from "./ContinuousDeepLinkNotice";
 export { useContinuousDeepLink } from "./useDeepLink";
 export type { DeepLinkResult } from "./useDeepLink";
 export { useContinuousEnabled } from "./useContinuousEnabled";
 export { useContinuousDayJump } from "./useDayJump";
 export { selectReviewItems } from "./selectReviews";
+export {
+  dedupeMirrors,
+  expandSelectionWithTwins,
+  expandWithTwins,
+  mirrorMapFromConfig,
+} from "./mirrors";
 export { describeMissingFootage } from "./footage";
 export { dayWindowFor } from "./dayNav";
 export { dayKeyToStartInTz, sameHour } from "./timeAlign";

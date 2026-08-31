@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { ReviewSegment } from "@/types/review";
-import { mergeReviews, retirePatches, ReviewPage } from "../store";
+import {
+  dropAbortedPage,
+  HeavyPage,
+  mergeHeavy,
+  mergeReviews,
+  retirePatches,
+  ReviewPage,
+} from "../store";
 
 const mk = (id: string, start: number, reviewed = false): ReviewSegment =>
   ({
@@ -133,5 +140,50 @@ describe("retirePatches", () => {
       patches,
     );
     expect(later[0].has_been_reviewed).toBe(false);
+  });
+});
+
+describe("dropAbortedPage — the placeholder an abort leaves behind (B1)", () => {
+  const loading = (after: number): HeavyPage => ({
+    after,
+    before: after + 3600,
+    status: "loading",
+    motion: [],
+    unavailable: [],
+  });
+  const done = (after: number): HeavyPage => ({
+    after,
+    before: after + 3600,
+    status: "done",
+    motion: [],
+    unavailable: [],
+  });
+
+  it("removes a placeholder so the page can be requested again", () => {
+    const pages = new Map([[100, loading(100)]]);
+    expect(dropAbortedPage(pages, 100)).toBe(true);
+    expect(pages.has(100)).toBe(false);
+  });
+
+  it("NEVER removes a page that already has data — an aborted refresh must not blank it", () => {
+    const pages = new Map([[100, done(100)]]);
+    expect(dropAbortedPage(pages, 100)).toBe(false);
+    expect(pages.get(100)?.status).toBe("done");
+  });
+
+  it("is a no-op for a page that is not there", () => {
+    expect(dropAbortedPage(new Map(), 100)).toBe(false);
+  });
+
+  it("negative control: leaving the placeholder makes the day permanently unloaded", () => {
+    // this is the defect, spelled out — `mergeHeavy` only emits `done`, so a stuck
+    // placeholder means `loaded` never covers that span and the strip shimmers for ever
+    const pages = new Map([[100, loading(100)]]);
+    expect(mergeHeavy(pages.values()).loaded).toEqual([]);
+    dropAbortedPage(pages, 100);
+    pages.set(100, done(100));
+    expect(mergeHeavy(pages.values()).loaded).toEqual([
+      { after: 100, before: 3700 },
+    ]);
   });
 });
