@@ -19,9 +19,27 @@
  * navigation to `/review?…`, and then the existing handler runs on the app's OWN URL with
  * every §2A.5 / D19 behaviour identical — there is no second copy of the link logic.
  *
+ * **The boot-only read was not enough (`.24`, measured 2026-08-31 on the iOS Simulator
+ * against real HA).** With the Frigate panel ALREADY OPEN, tapping a notification does not
+ * reload anything: the companion app asks HA's frontend to navigate in page —
+ * `history.pushState(null, "", "/<slug>/ingress/review?id=…&camera=…")` followed by a
+ * `location-changed` event — and HA keeps the SAME iframe element (a probe mark on it
+ * survives), with the same `src` of `…/hassio_ingress/<token>//`. Nothing in the frame
+ * reloads, so a bridge that only runs at mount never sees the new href: the link is
+ * silently ignored for exactly the user who is most likely to tap it, the one who was just
+ * looking at Frigate. It "worked" in testing only when HA happened to be on another panel,
+ * because that is what creates the iframe.
+ *
+ * So the bridge also SUBSCRIBES to the parent's navigations while it is mounted —
+ * `location-changed` (HA's own event, fired on every in-app navigation) and `popstate`,
+ * plus cheap re-reads on `pageshow` / `visibilitychange` for the iOS case where the webview
+ * comes back without either. Every one of them funnels into the same guarded read, so an
+ * unchanged href costs one string comparison and a new one behaves exactly like a boot.
+ *
  * Two hard rules:
- *  - consume ONCE PER LINK. A module-level flag is not enough (`.23` reviewer finding,
- *    MAJOR): it covers a remount, but anything that REBOOTS the app inside the frame —
+ *  - consume ONCE PER LINK — per LINK, not per boot, which is why the key is the href and
+ *    not a boolean. A module-level flag was not enough (`.23` reviewer finding, MAJOR): it
+ *    covers a remount, but anything that REBOOTS the app inside the frame —
  *    RestartDialog's `window.location.href = baseUrl`, the language provider's `reload()`,
  *    AuthForm after login, iOS reclaiming the WKWebView — starts a fresh module instance,
  *    re-reads the UNCHANGED outer `…/ingress/review?id=` and yanks the user back to a
@@ -31,17 +49,20 @@
  *  - never write to the parent. `navigate(..., { replace: true })` acts on the IFRAME's own
  *    history; `window.top.history` is not touched, so HA's panel is left exactly as it was.
  */
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { deepLinkFromTop, TopDeepLink } from "./deepLink";
 
 /**
- * Per-boot flag. Still here, and still first: within one boot the parent's URL cannot
- * change (a navigation in HA's panel reloads this frame), so re-asking after the app has
- * navigated can only produce a stale yes. It is also the whole guard when `sessionStorage`
- * is unavailable — see `alreadyConsumed`.
+ * The last href this module acted on, in memory.
+ *
+ * `.23` had a boolean here and asked the question once per boot. `.24` removes that: the
+ * parent's URL CAN change without a reload (see the header), so "have we already asked" is
+ * the wrong question and "have we already acted on THIS href" is the right one. It is also
+ * the whole guard when `sessionStorage` is unavailable, and it is what stops a burst of
+ * `location-changed` / `visibilitychange` events doing anything more than a comparison.
  */
-let consumed = false;
+let lastHandledHref: string | null = null;
 
 /**
  * Where the href of the link we have already acted on is remembered.
@@ -61,6 +82,7 @@ const CONSUMED_KEY = "frigate.fork.topDeepLink.consumed";
  * fires at all.
  */
 function alreadyConsumed(href: string): boolean {
+  if (lastHandledHref === href) return true;
   try {
     return window.sessionStorage.getItem(CONSUMED_KEY) === href;
   } catch {
@@ -69,10 +91,11 @@ function alreadyConsumed(href: string): boolean {
 }
 
 function markConsumed(href: string) {
+  lastHandledHref = href;
   try {
     window.sessionStorage.setItem(CONSUMED_KEY, href);
   } catch {
-    // see `alreadyConsumed` — degrade to `.22` behaviour rather than refuse to navigate
+    // see `alreadyConsumed` — the in-memory key still holds for this boot
   }
 }
 
@@ -84,7 +107,7 @@ function markConsumed(href: string) {
  * about, so it has to be reachable.
  */
 export function resetTopDeepLinkForTests({ keepSession = false } = {}) {
-  consumed = false;
+  lastHandledHref = null;
   if (keepSession) return;
   try {
     window.sessionStorage.removeItem(CONSUMED_KEY);
@@ -119,29 +142,98 @@ export function readTopDeepLink(ownSearch: string): TopDeepLink | null {
   return deepLinkFromTop({ ownSearch, topHref, sameOrigin });
 }
 
+/**
+ * The parent window, or null if there isn't one we may touch.
+ *
+ * The cross-origin case is established by TOUCHING `location` — the getter is what throws,
+ * and a bridge that registered listeners on an embedder it cannot read would be both
+ * useless and rude.
+ */
+function readableParent(): Window | null {
+  try {
+    if (typeof window === "undefined") return null;
+    const top = window.top;
+    if (!top || top === window.self) return null;
+    void top.location.href; // throws on a cross-origin embedder
+    return top;
+  } catch {
+    return null;
+  }
+}
+
 export function useTopUrlDeepLink() {
   const location = useLocation();
   const navigate = useNavigate();
+  // The app's OWN search string, read at the moment of each attempt rather than closed over:
+  // rule 2 in `deepLinkFromTop` is "our own params win", and by the time HA navigates the
+  // panel again the SPA is somewhere else entirely.
+  const search = useRef(location.search);
+  search.current = location.search;
+
   useEffect(() => {
-    if (consumed) return;
-    // Marked consumed on the FIRST run whatever the answer, including "no link at all":
-    // this is a boot-time question, and re-asking it later can only produce a stale yes.
-    consumed = true;
-    const { topHref, sameOrigin } = readTopLocation();
-    // The app's OWN search string, not the parent's and not "" — rule 2 in
-    // `deepLinkFromTop` is "our own params win", and it can only apply if it is given them.
-    const link = deepLinkFromTop({
-      ownSearch: location.search,
-      topHref,
-      sameOrigin,
-    });
-    if (!link || !topHref) return;
-    // The `.23` guard: this exact outer URL has already been turned into a navigation in
-    // this panel session, so an in-frame reload must NOT replay it. Checked after the link
-    // is resolved, so an ordinary visit never writes the key.
-    if (alreadyConsumed(topHref)) return;
-    markConsumed(topHref);
-    navigate(`/review?${link.search}`, { replace: true });
+    /**
+     * One guarded read of the parent's URL. Safe to call as often as we like: an href that
+     * has already been acted on costs a string comparison, and an href with no link costs
+     * a URL parse. Nothing here writes to the parent.
+     */
+    const attempt = (fromParentNavigation: boolean) => {
+      const { topHref, sameOrigin } = readTopLocation();
+      if (!sameOrigin || !topHref) return;
+      // The `.23` guard, now doing double duty: it stops an in-frame RELOAD replaying the
+      // link, and it stops the `.24` listeners re-firing on an unchanged href.
+      if (alreadyConsumed(topHref)) return;
+      // Rule 2 ("our own params win") is a BOOT rule, and only a boot rule. At boot the
+      // parent's URL may be arbitrarily old, so a link the app already carries is the more
+      // specific intent. A parent NAVIGATION is the opposite case: the user just tapped
+      // something, so the parent's href is by definition the newer intent — and applying
+      // rule 2 there would drop the second notification of a session, because the app's own
+      // URL still carries the first one until the handler consumes it. Caught by the L1
+      // test "fires again for a DIFFERENT notification without any reload".
+      const link = deepLinkFromTop({
+        ownSearch: fromParentNavigation ? "" : search.current,
+        topHref,
+        sameOrigin,
+      });
+      // Not marked when there is no link: an ordinary visit must not poison the key for a
+      // notification that arrives later on the same href.
+      if (!link) return;
+      markConsumed(topHref);
+      navigate(`/review?${link.search}`, { replace: true });
+    };
+
+    attempt(false); // boot — the `.22`/`.23` path, unchanged in behaviour
+
+    // …and while we are mounted, whenever the PARENT navigates. `location-changed` is Home
+    // Assistant's own event (its frontend fires it on every in-app navigation, which is how
+    // the companion app opens a notification when HA is already running); `popstate` covers
+    // a back/forward in the panel. See the header for what was measured.
+    const parent = readableParent();
+    const onTopNavigation = () => attempt(true);
+    if (parent) {
+      try {
+        parent.addEventListener("location-changed", onTopNavigation);
+        parent.addEventListener("popstate", onTopNavigation);
+      } catch {
+        // an embedder that refuses listeners is simply "no link", as ever
+      }
+    }
+    // iOS brings a webview back without either of the above; both of these are cheap and
+    // idempotent because of the href key.
+    window.addEventListener("pageshow", onTopNavigation);
+    document.addEventListener("visibilitychange", onTopNavigation);
+
+    return () => {
+      if (parent) {
+        try {
+          parent.removeEventListener("location-changed", onTopNavigation);
+          parent.removeEventListener("popstate", onTopNavigation);
+        } catch {
+          // nothing to remove
+        }
+      }
+      window.removeEventListener("pageshow", onTopNavigation);
+      document.removeEventListener("visibilitychange", onTopNavigation);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 }

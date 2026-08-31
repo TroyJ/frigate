@@ -29,6 +29,7 @@ import {
 import { isDesktop, isMobileOnly } from "react-device-detect";
 import { cn } from "@/lib/utils";
 import { REVIEW_PADDING, ReviewSegment, ZoomLevel } from "@/types/review";
+import { reviewSeekTarget } from "./seekTarget";
 import { TimeRange, TimelineType } from "@/types/timeline";
 import { useTimelineZoom } from "@/hooks/use-timeline-zoom";
 import {
@@ -324,8 +325,12 @@ export function ContinuousTimelinePanel({
         <ContinuousEventList
           items={items}
           activeReviewItem={active}
+          // `.24`: AT the detection, like the deep link and the Review-grid card. This is
+          // the same "show me THIS alert" gesture, on the very surface a `?id=&tab=events`
+          // link lands on — with the 4 s padding the playhead jumped BACKWARDS from where
+          // the link had just put it (reviewer finding on `.23`).
           onSelect={(review) =>
-            manuallySetCurrentTime(review.start_time - REVIEW_PADDING, true)
+            manuallySetCurrentTime(reviewSeekTarget(review.start_time), true)
           }
         />
       )}

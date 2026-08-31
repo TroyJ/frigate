@@ -94,17 +94,60 @@ function reboot(entry = "/") {
   return mount(entry);
 }
 
-/** Pretend this document is framed by `href` — or, with `throws`, by another origin. */
+/**
+ * Pretend this document is framed by `href` — or, with `throws`, by another origin.
+ *
+ * The fake is a STABLE object with a real `EventTarget` behind it, because `.24`'s bridge
+ * subscribes to the parent: a getter that minted a new object per access would hand the
+ * production code a listener registry nobody could ever dispatch on, and every subscription
+ * test would pass by doing nothing. `addEventListener` is counted so a test can assert that
+ * a cross-origin embedder gets NO listener at all.
+ */
 function fakeTop(href: string | null, throws = false) {
+  const bus = new EventTarget();
+  let current = href;
+  let added = 0;
+  const fake = {
+    addEventListener: (type: string, fn: EventListener) => {
+      added += 1;
+      bus.addEventListener(type, fn);
+    },
+    removeEventListener: (type: string, fn: EventListener) => {
+      added -= 1;
+      bus.removeEventListener(type, fn);
+    },
+    get location() {
+      if (throws) throw new Error("SecurityError: cross-origin");
+      return { href: current };
+    },
+  };
   Object.defineProperty(window, "top", {
     configurable: true,
-    get: () => ({
-      get location() {
-        if (throws) throw new Error("SecurityError: cross-origin");
-        return { href };
-      },
-    }),
+    get: () => fake,
   });
+  return {
+    /** HA's in-page navigation: the outer URL changes, the iframe is NOT recreated. */
+    navigateTop(next: string, type = "location-changed") {
+      current = next;
+      act(() => {
+        bus.dispatchEvent(new Event(type));
+      });
+      return where();
+    },
+    /** Fire the event WITHOUT changing the href — the "already handled" case. */
+    fire(type = "location-changed") {
+      act(() => {
+        bus.dispatchEvent(new Event(type));
+      });
+      return where();
+    },
+    listenerCount: () => added,
+  };
+}
+
+/** What the router is showing right now. */
+function where() {
+  return container.querySelector("[data-testid=where]")?.textContent;
 }
 
 beforeEach(() => {
@@ -118,6 +161,8 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+  // `mountBrowser` drives the real history; leave the URL as the suite found it
+  window.history.replaceState(null, "", "/");
   Object.defineProperty(window, "top", {
     configurable: true,
     get: () => window,
@@ -254,6 +299,92 @@ describe("a bare modifier param does not navigate", () => {
     expect(mount()).toBe(
       "/review?id=1788166705.391357-3rk76l&camera=entrance_tele",
     );
+  });
+});
+
+/**
+ * `.24` — the case that made `.23` look like it had changed nothing.
+ *
+ * Measured on the iOS Simulator against real HA: with the Frigate panel ALREADY OPEN, the
+ * companion app opens a notification by asking HA's frontend to navigate IN PAGE
+ * (`history.pushState` + a `location-changed` event). HA keeps the same iframe element and
+ * the same `src`, so nothing in the frame reloads and a boot-only bridge never sees the
+ * link. These tests dispatch exactly that event on the fake parent.
+ */
+describe("the bridge follows the parent's in-page navigations (`.24`)", () => {
+  const FRAME = "https://bali.jezcf.com/api/hassio_ingress/abc123//";
+
+  it("navigates when HA pushes a notification URL into the panel", () => {
+    // the user is already inside Frigate: the panel is on the plain ingress URL and the
+    // app is on Live — no reload happens at any point in this test
+    const top = fakeTop(FRAME);
+    expect(mount()).toBe("/");
+    expect(top.navigateTop(PANEL)).toBe("/review?id=1788166705.391357-3rk76l");
+  });
+
+  it("carries the camera the push named", () => {
+    const top = fakeTop(FRAME);
+    mount();
+    expect(top.navigateTop(`${PANEL}&camera=entrance_tele`)).toBe(
+      "/review?id=1788166705.391357-3rk76l&camera=entrance_tele",
+    );
+  });
+
+  it("acts once per href, however many events HA fires", () => {
+    // HA fires `location-changed` liberally, and iOS adds `pageshow`/`visibilitychange` on
+    // top; the href key is what makes the repeats free
+    const top = fakeTop(FRAME);
+    mount();
+    expect(top.navigateTop(PANEL)).toBe("/review?id=1788166705.391357-3rk76l");
+    expect(top.fire()).toBe("/review?id=1788166705.391357-3rk76l");
+    expect(top.fire("popstate")).toBe("/review?id=1788166705.391357-3rk76l");
+  });
+
+  it("fires again for a DIFFERENT notification without any reload", () => {
+    const top = fakeTop(FRAME);
+    mount();
+    top.navigateTop(PANEL);
+    expect(top.navigateTop(PANEL2)).toBe("/review?id=1788200000.111111-zz99xx");
+  });
+
+  it("follows a back/forward in the panel (`popstate`)", () => {
+    const top = fakeTop(FRAME);
+    mount();
+    expect(top.navigateTop(PANEL, "popstate")).toBe(
+      "/review?id=1788166705.391357-3rk76l",
+    );
+  });
+
+  it("ignores a parent navigation that carries no destination", () => {
+    // the user clicking around HA must never move the app
+    const top = fakeTop(FRAME);
+    mount();
+    expect(top.navigateTop("https://bali.jezcf.com/lovelace/0")).toBe("/");
+    expect(
+      top.navigateTop(
+        "https://bali.jezcf.com/504b4bcb_frigate-fa/ingress/review?tab=detail",
+      ),
+    ).toBe("/");
+  });
+
+  it("stops listening when the bridge unmounts", () => {
+    const top = fakeTop(FRAME);
+    mount();
+    expect(top.listenerCount()).toBeGreaterThan(0);
+    act(() => root.unmount());
+    root = createRoot(container);
+    expect(top.listenerCount()).toBe(0);
+    // dispatching now must not throw, and must not queue a navigation for the next mount
+    top.fire();
+    resetTopDeepLinkForTests({ keepSession: true });
+    expect(mount()).toBe("/");
+  });
+
+  it("registers no listener at all on a cross-origin embedder", () => {
+    // Frigate may legitimately be embedded elsewhere; we must neither read nor subscribe
+    const top = fakeTop(null, true);
+    expect(mount()).toBe("/");
+    expect(top.listenerCount()).toBe(0);
   });
 });
 
