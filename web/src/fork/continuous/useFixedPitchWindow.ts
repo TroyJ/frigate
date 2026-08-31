@@ -50,7 +50,9 @@ export type FixedPitchWindow = {
       /**
        * Skip the scroll when the target is NOT already near the viewport.
        *
-       * The inverse of `ifNeeded`, and the two answer different questions. `ifNeeded` asks
+       * Strictly it is "only if NEARBY" — the target must be within one viewport of the
+       * viewport, not literally on screen — and it is NOT the inverse of `ifNeeded`: both
+       * suppress a scroll, they just disagree about which ones deserve it. `ifNeeded` asks
        * "is it already comfortably on screen, so moving would be a pointless yank?".
        * `onlyIfVisible` asks "is the caller allowed to drag the viewport somewhere the user
        * did not ask to go?" — for an automatic follow the answer is no. See the strip-reset

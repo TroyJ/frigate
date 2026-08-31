@@ -291,6 +291,16 @@ export function ContinuousMotionStrip({
     (segmentTime: number, ifNeeded?: boolean, behavior?: ScrollBehavior) => {
       const index = Math.round((startAligned - segmentTime) / segmentDuration);
       if (index < 0 || index >= count) return;
+      // A "jump exemption" (honour a follow whose target moved by more than a few segments,
+      // i.e. a card opening or a seek) was added here on review and then REMOVED, because it
+      // had no negative control. The review's premise was that the automatic follow is the
+      // only thing that positions the strip on a card click, so gating it on proximity would
+      // leave an old review opening at `now`. Measured on 2026-08-31 against the new gate
+      // "opening a recording puts the playhead on screen": a 16.4 h old review opened by
+      // CLICKING ITS CARD lands at scrollTop 15,498 with the handlebar row at 15,806 — 308 px
+      // into a 628 px viewport — and it lands there IDENTICALLY with the exemption present and
+      // absent. Something other than this follow does the initial positioning. The gate stays
+      // (it guards the outcome whatever does the work); the untested branch does not.
       win.scrollToIndex(index, {
         ifNeeded,
         behavior,
