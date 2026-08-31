@@ -24,6 +24,10 @@
  *   - the "is the playhead inside this review" predicates (`ContinuousTimelinePanel`,
  *     `RecordingView`, `DetailStream`) — those are TOLERANCES, not seek targets, and
  *     tightening them would make a review stop being "current" 4 s early
+ *   - `RecordingView.tsx:1352` — a real seek, still `start_time - REVIEW_PADDING`, and
+ *     deliberately left alone: it belongs to upstream's `Timeline`, which the fork replaces
+ *     with `ContinuousTimelinePanel` whenever `continuous.enabled`. Unreachable on the
+ *     continuous path; if the toggle is ever retired, this one comes with it
  *   - upstream's own non-continuous `useSearchEffect("id")` path in `pages/Events.tsx`
  *   - the timeline panel's review-band click and `AnimatedEventCard` — different gestures,
  *     not the notification path, and out of scope

@@ -23,6 +23,7 @@ import {
   Route,
   Routes,
   useLocation,
+  useNavigate,
 } from "react-router-dom";
 import {
   ContinuousTopLinkBridge,
@@ -47,6 +48,25 @@ function Probe() {
   );
 }
 
+/**
+ * A handle on the router, so a test can move the app the way the USER would.
+ *
+ * Several `.25` cases only mean something if the app has left the review since the link
+ * landed (that is the whole point of a re-tap), and asserting "we are still on /review"
+ * cannot tell a working re-tap from a no-op.
+ */
+let goTo: ((to: string) => void) | null = null;
+function Navigator() {
+  goTo = useNavigate();
+  return null;
+}
+
+/** The user browses on inside Frigate. */
+function navigatedAway() {
+  act(() => goTo?.("/elsewhere"));
+  expect(where()).toBe("/elsewhere");
+}
+
 let container: HTMLDivElement;
 let root: Root;
 
@@ -55,6 +75,7 @@ function mount(entry = "/") {
     root.render(
       <MemoryRouter initialEntries={[entry]}>
         <ContinuousTopLinkBridge />
+        <Navigator />
         <Routes>
           <Route path="*" element={<Probe />} />
         </Routes>
@@ -76,6 +97,7 @@ function mountBrowser(basename: string, inFramePath: string) {
     root.render(
       <BrowserRouter basename={basename}>
         <ContinuousTopLinkBridge />
+        <Navigator />
         <Routes>
           <Route path="*" element={<Probe />} />
         </Routes>
@@ -126,6 +148,15 @@ function fakeTop(href: string | null, throws = false) {
     get: () => fake,
   });
   return {
+    /** A `pageshow` / `visibilitychange` — "we may have missed something", not user intent. */
+    recheck(type: "pageshow" | "visibilitychange", next?: string) {
+      if (next !== undefined) current = next;
+      act(() => {
+        if (type === "pageshow") window.dispatchEvent(new Event("pageshow"));
+        else document.dispatchEvent(new Event("visibilitychange"));
+      });
+      return where();
+    },
     /** HA's in-page navigation: the outer URL changes, the iframe is NOT recreated. */
     navigateTop(next: string, type = "location-changed") {
       current = next;
@@ -330,14 +361,111 @@ describe("the bridge follows the parent's in-page navigations (`.24`)", () => {
     );
   });
 
-  it("acts once per href, however many events HA fires", () => {
-    // HA fires `location-changed` liberally, and iOS adds `pageshow`/`visibilitychange` on
-    // top; the href key is what makes the repeats free
+  it("swallows a BURST of location-changed on one href, then honours a re-tap (`.25`)", async () => {
+    // The `.24` review's MAJOR. HA's own `navigate()` has no same-URL short-circuit
+    // (`_external-repos/ha-frontend/src/common/navigate.ts`: it always pushes and always
+    // fires), and this bridge never writes the parent — so the panel URL stays at
+    // `…/review?id=A` all session and tapping A again is a byte-identical href. Keying that
+    // dropped the tap in silence, which is the very symptom `.24` existed to remove.
     const top = fakeTop(FRAME);
     mount();
     expect(top.navigateTop(PANEL)).toBe("/review?id=1788166705.391357-3rk76l");
+
+    // in-app: the handler consumes the params, so the app leaves the link URL
+    act(() => {
+      window.dispatchEvent(new Event("pageshow"));
+    });
+    // …a second event on the SAME href inside the burst window changes nothing
+    const before = where();
+    expect(top.fire()).toBe(before);
+
+    // …and outside it, the same href is honoured again — that is the re-tap
+    await new Promise((r) => setTimeout(r, 550));
+    navigatedAway();
     expect(top.fire()).toBe("/review?id=1788166705.391357-3rk76l");
-    expect(top.fire("popstate")).toBe("/review?id=1788166705.391357-3rk76l");
+  });
+
+  it("a popstate on an unchanged href stays keyed — HA closes dialogs with history.back()", () => {
+    // `ensureDialogsClosed` in HA's navigate.ts goes back to dismiss a dialog; that arrives
+    // here as a popstate carrying no new intent, and must not re-open the notification
+    const top = fakeTop(FRAME);
+    mount();
+    expect(top.navigateTop(PANEL)).toBe("/review?id=1788166705.391357-3rk76l");
+    navigatedAway();
+    expect(top.fire("popstate")).toBe("/elsewhere");
+  });
+
+  it.each(["pageshow", "visibilitychange"] as const)(
+    "%s is a RECHECK: it fires for a new href but never bypasses the key",
+    (type) => {
+      const top = fakeTop(FRAME);
+      mount();
+      // a new href arrives while we were not looking — the recheck must catch it
+      expect(top.recheck(type, PANEL)).toBe(
+        "/review?id=1788166705.391357-3rk76l",
+      );
+      // …and the SAME href must not drag the user back every time they switch apps
+      navigatedAway();
+      expect(top.recheck(type)).toBe("/elsewhere");
+    },
+  );
+
+  it("a recheck still respects rule 2 — an in-app link wins over a stale parent URL", () => {
+    // only a deliberate navigation may override our own URL; a recheck is not user intent
+    const top = fakeTop(FRAME);
+    mount("/review?id=already-here");
+    expect(top.recheck("pageshow", PANEL)).toBe("/review?id=already-here");
+  });
+
+  it("registers and releases its window/document listeners across remounts", () => {
+    // a leak here is invisible until several mounts later, when one event does the work N
+    // times; count the real registrations rather than trusting the cleanup by inspection
+    const added: string[] = [];
+    const removed: string[] = [];
+    const origAddW = window.addEventListener;
+    const origRemW = window.removeEventListener;
+    const origAddD = document.addEventListener;
+    const origRemD = document.removeEventListener;
+    window.addEventListener = ((t: string, ...rest: unknown[]) => {
+      if (t === "pageshow") added.push("pageshow");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (origAddW as any).call(window, t, ...rest);
+    }) as typeof window.addEventListener;
+    window.removeEventListener = ((t: string, ...rest: unknown[]) => {
+      if (t === "pageshow") removed.push("pageshow");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (origRemW as any).call(window, t, ...rest);
+    }) as typeof window.removeEventListener;
+    document.addEventListener = ((t: string, ...rest: unknown[]) => {
+      if (t === "visibilitychange") added.push("visibilitychange");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (origAddD as any).call(document, t, ...rest);
+    }) as typeof document.addEventListener;
+    document.removeEventListener = ((t: string, ...rest: unknown[]) => {
+      if (t === "visibilitychange") removed.push("visibilitychange");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (origRemD as any).call(document, t, ...rest);
+    }) as typeof document.removeEventListener;
+    try {
+      fakeTop(FRAME);
+      mount();
+      act(() => root.unmount());
+      root = createRoot(container);
+      resetTopDeepLinkForTests({ keepSession: true });
+      mount();
+      expect(added).toEqual([
+        "pageshow",
+        "visibilitychange",
+        "pageshow",
+        "visibilitychange",
+      ]);
+      expect(removed).toEqual(["pageshow", "visibilitychange"]);
+    } finally {
+      window.addEventListener = origAddW;
+      window.removeEventListener = origRemW;
+      document.addEventListener = origAddD;
+      document.removeEventListener = origRemD;
+    }
   });
 
   it("fires again for a DIFFERENT notification without any reload", () => {
