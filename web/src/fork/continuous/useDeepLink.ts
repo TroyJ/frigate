@@ -8,10 +8,17 @@
  * the user cannot scroll out of where the link dropped them) or is ignored (so the link
  * lands at "now" showing the wrong moment). Both failures are silent.
  *
- * What happens instead (§2A.3): resolve the id → open the scrubber at
- * `start_time - REVIEW_PADDING` → hand `navigateToTime` a TIMESTAMP, which is
- * timezone-free, so the browser-local `getBeginningOfDayTimestamp` bug in the old path
- * (§2A.6) disappears rather than being inherited.
+ * What happens instead (§2A.3): resolve the id → open the scrubber AT the review's
+ * `start_time` (`.23`: no lead-in — see `seekTarget.ts` for what was measured on a real
+ * phone) → hand `navigateToTime` a TIMESTAMP, which is timezone-free, so the browser-local
+ * `getBeginningOfDayTimestamp` bug in the old path (§2A.6) disappears rather than being
+ * inherited.
+ *
+ * `.23` also adds `?camera=`: WHICH camera to open the moment on. Detection runs on one
+ * camera and `review.alerts.mirror_from` mirrors the review onto the other lens, so the
+ * push carries the wide camera's review id while the useful picture is the telephoto's.
+ * It is not a filter — it never touches `cameras=`/`reviewFilter`, because a filter change
+ * discards the loaded window (§2A.4 / F14.4).
  *
  * Every §2A.5 failure mode ends in a STATED outcome, because a link is a stored reference
  * and outlives the thing it points at:
@@ -30,7 +37,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import axios from "axios";
-import { REVIEW_PADDING, ReviewSegment, ReviewSeverity } from "@/types/review";
+import { ReviewSegment, ReviewSeverity } from "@/types/review";
 import { TimelineType } from "@/types/timeline";
 import {
   DeepLinkProblem,
@@ -38,6 +45,7 @@ import {
   parseDeepLink,
   preferResolveProblem,
 } from "./deepLink";
+import { reviewSeekTarget } from "./seekTarget";
 import { DeepLinkNav, SurfaceName } from "./ContinuousProvider";
 
 export type DeepLinkOpen = {
@@ -64,6 +72,16 @@ type Params = {
   revealOnReviewPage?: (review: ReviewSegment) => boolean;
   /** For a bare `?t=` on History, which camera to open. */
   cameraForMoment?: string;
+  /**
+   * Every camera in the loaded config, for `?camera=` (`.23`).
+   *
+   * `undefined` means "not known yet" — the config is an SWR call — and is NOT the same as
+   * "no cameras": a link that names a camera while the config is still in flight is trusted
+   * rather than second-guessed, because the alternative is silently ignoring the one thing
+   * the link asked for. A camera that genuinely is not there degrades rather than crashing
+   * (F15), so trusting it is bounded.
+   */
+  knownCameras?: string[];
   /** Oldest retained recording, for the "older than retention" case (§2A.5). */
   oldestRecording?: number;
 };
@@ -118,6 +136,7 @@ export function useContinuousDeepLink({
   openRecording,
   revealOnReviewPage,
   cameraForMoment,
+  knownCameras,
   oldestRecording,
 }: Params): DeepLinkResult {
   const [searchParams] = useSearchParams();
@@ -159,6 +178,7 @@ export function useContinuousDeepLink({
         t: searchParams.get("t"),
         tab: searchParams.get("tab"),
         surface: searchParams.get("surface"),
+        camera: searchParams.get("camera"),
       }),
     [searchParams],
   );
@@ -170,12 +190,44 @@ export function useContinuousDeepLink({
     openRecording,
     revealOnReviewPage,
     cameraForMoment,
+    knownCameras,
   });
   latest.current = {
     openRecording,
     revealOnReviewPage,
     cameraForMoment,
+    knownCameras,
   };
+
+  /**
+   * `?camera=` → the camera to open the moment on, or the fallback plus a notice (`.23`).
+   *
+   * Three rules, in order:
+   *  1. no `camera=` → the fallback (the review's own camera, or `cameraForMoment`), i.e.
+   *     exactly `.22`'s behaviour for every link already sitting on a phone.
+   *  2. a camera the config HAS → that one. This is the whole point: the push carries the
+   *     wide lens's review id, and `&camera=entrance_tele` opens the telephoto at the same
+   *     moment. It is a view choice, not a filter — nothing here touches `reviewFilter`.
+   *  3. a camera the config does NOT have → the fallback, AND say so. A link is a stored
+   *     reference (§2A.5): cameras get renamed and removed, and silently opening a
+   *     different camera than the link named is the "landed somewhere with no explanation"
+   *     failure D11 exists to remove.
+   *
+   * When the camera list is not loaded yet the link is trusted (rule 2), see `knownCameras`.
+   */
+  const resolveCamera = useCallback(
+    // Generic in the FALLBACK so the caller keeps what it knows: the `?id=` path passes the
+    // review's own camera (a string, so the result is a string), the `?t=` path passes a
+    // camera that may not exist yet.
+    <T extends string | undefined>(named: string | undefined, fallback: T) => {
+      if (!named) return fallback;
+      const known = latest.current.knownCameras;
+      if (!known || known.includes(named)) return named as string | T;
+      setResolveProblem((prev) => preferResolveProblem(prev, "camera-missing"));
+      return fallback as string | T;
+    },
+    [],
+  );
 
   // React 18 StrictMode mounts every effect twice in dev, and this one fires an HTTP GET
   // and opens a page. Key the guard on the LINK, not on a boolean, so a second link in the
@@ -184,7 +236,7 @@ export function useContinuousDeepLink({
 
   useEffect(() => {
     if (!ready || !request) return;
-    const key = `${request.id ?? ""}|${request.t ?? ""}|${request.tab}|${request.view}`;
+    const key = `${request.id ?? ""}|${request.t ?? ""}|${request.tab}|${request.view}|${request.camera ?? ""}`;
     if (handled.current === key) return;
     handled.current = key;
     // The token every continuation below checks before it writes anything. Link 1's lookup
@@ -229,7 +281,13 @@ export function useContinuousDeepLink({
       // here has a moment.
       const moment = request.t as number;
       if (request.view === "history") {
-        const camera = latest.current.cameraForMoment;
+        // `.23`: `camera=` overrides the default choice for a bare moment. On
+        // `surface=review` there is no player and no camera to choose, so it is inert
+        // there — see the note on the `?id=` branch below.
+        const camera = resolveCamera(
+          request.camera,
+          latest.current.cameraForMoment,
+        );
         // No camera to open — the History scrubber is per-camera. Say so rather than
         // opening an arbitrary one.
         if (!camera) {
@@ -273,7 +331,8 @@ export function useContinuousDeepLink({
           );
           return;
         }
-        const startTime = review.start_time - REVIEW_PADDING;
+        // `.23`: AT the detection, not 4 s before it (`seekTarget.ts`).
+        const startTime = reviewSeekTarget(review.start_time);
         // The footage-expired check does NOT happen here: `oldestRecording` comes from an
         // SWR call that is usually still in flight on a cold load, so sampling it once at
         // this instant meant §2A.5's "older than retention" reason simply never appeared for
@@ -281,13 +340,24 @@ export function useContinuousDeepLink({
         // becoming known.
         setNavigatedStart(review.start_time);
         if (request.view === "history") {
+          // `.23`: open the moment on the camera the link named, falling back to the
+          // review's own. The review is still resolved exactly as before — the id decides
+          // WHEN and whether the link is alive at all, `camera=` only decides WHICH lens.
           latest.current.openRecording({
-            camera: review.camera,
+            camera: resolveCamera(request.camera, review.camera),
             startTime,
             severity: review.severity,
             tab: request.tab,
           });
         } else {
+          // `surface=review`: `camera=` is deliberately IGNORED (`.23`). The Review grid
+          // shows CARDS, and the card this link selects is the wide camera's review — the
+          // one whose id the push carries. Honouring `camera=` here could only mean either
+          // filtering the grid (which discards the loaded window, §2A.4 / F14.4) or
+          // selecting a different review than the link named. Neither is what the param
+          // says. It stays inert, and no notice is raised for an unknown camera on this
+          // surface, because nothing was overridden.
+
           // `withReviewedFlag` is a SECOND round-trip, so the token has to be re-checked
           // after it — and at STATEMENT level, so the whole continuation stops. Suppressing
           // only the reveal let execution fall through to `setNav` below, which is the one

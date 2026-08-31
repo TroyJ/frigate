@@ -11,7 +11,7 @@
  * **Do not change the URL shape here without changing `frigate-notifications-handover.md`
  * (§2A.7).** The Node-RED side builds `<slug>/ingress/review?id=<review_id>` today, and
  * pushes already delivered must keep resolving. Everything this module adds — `t`,
- * `surface` — is OPTIONAL and defaults to exactly today's behaviour.
+ * `surface`, `camera` — is OPTIONAL and defaults to exactly today's behaviour.
  *
  * Why this is not just `Number(param)`: a deep link's `t` arrives from whatever produced
  * the link. Milliseconds are the obvious mistake (`Date.now()` rather than `/1000`), and a
@@ -43,6 +43,7 @@ export type DeepLinkProblem =
   | "review-unavailable" // the lookup itself failed (offline, 5xx)
   | "footage-expired" // resolved, but older than the recording horizon
   | "filters-adjusted" // D19 — the view was relaxed to reach the target
+  | "camera-missing" // `?camera=` named a camera this config does not have
   | "invalid-tab"
   | "invalid-time"
   | "invalid-surface";
@@ -54,6 +55,16 @@ export type DeepLinkRequest = {
   t?: number;
   tab: TimelineType;
   view: DeepLinkView;
+  /**
+   * `?camera=` — WHICH camera to open the moment on (`.23`), not a filter.
+   *
+   * Detection runs on one camera only (`entrance_high`), and the fork's
+   * `review.alerts.mirror_from` gives `entrance_tele` a mirror review with the same times.
+   * The push carries the WIDE review's id, so without this the tap can only ever open the
+   * wide lens. Kept as a free string here — whether the config actually has that camera is
+   * not knowable in a pure parser, and is decided in `useDeepLink`.
+   */
+  camera?: string;
   /** Everything that was wrong with the link, in the order it was found. */
   problems: DeepLinkProblem[];
 };
@@ -122,10 +133,12 @@ export function parseDeepLink(
     t?: string | null;
     tab?: string | null;
     surface?: string | null;
+    camera?: string | null;
   },
   now: number = Date.now() / 1000,
 ): DeepLinkRequest | undefined {
   const id = raw.id?.trim() || undefined;
+  const camera = raw.camera?.trim() || undefined;
   const hasT = raw.t != null && raw.t !== "";
   const t = parseMoment(raw.t, now);
   const { tab, valid: tabValid } = parseTab(raw.tab);
@@ -144,10 +157,11 @@ export function parseDeepLink(
     !!id ||
     hasT ||
     (raw.tab != null && raw.tab !== "") ||
-    (raw.surface != null && raw.surface !== "");
+    (raw.surface != null && raw.surface !== "") ||
+    !!camera;
   if (!present) return undefined;
 
-  return { id, t, tab, view, problems };
+  return { id, t, tab, view, camera, problems };
 }
 
 /**
@@ -156,13 +170,22 @@ export function parseDeepLink(
  * parent frame: a notification link does not set them, and inventing them would change the
  * filter — which discards the loaded window (§2A.4 / F14.4).
  */
-export const DEEP_LINK_PARAMS = ["id", "t", "tab", "surface"] as const;
+export const DEEP_LINK_PARAMS = [
+  "id",
+  "t",
+  "tab",
+  "surface",
+  // `.23`, appended rather than inserted: the order is the order the recovered search
+  // string is re-emitted in, and the existing gates assert on that string.
+  "camera",
+] as const;
 
 export type TopDeepLink = {
   id?: string;
   t?: string;
   tab?: string;
   surface?: string;
+  camera?: string;
   /** Query string (no leading `?`) carrying exactly the params above, in DEEP_LINK_PARAMS order. */
   search: string;
 };
@@ -195,6 +218,9 @@ export type TopDeepLink = {
  *     panel URL is just "the user opened Frigate", and treating it as a link would hijack
  *     an ordinary visit.
  *  4. at least one owned param must be present, or there is nothing to hand over.
+ *  5. one of them must be a DESTINATION (`id`/`t`). `tab`/`surface`/`camera` on their own
+ *     are modifiers the handler ignores, so acting on them would move the user off Live
+ *     and consume nothing (`.23` reviewer finding).
  *
  * The caller consumes the result ONCE per boot (see `useTopUrlDeepLink`) and never writes to
  * the parent's history.
@@ -238,7 +264,12 @@ export function deepLinkFromTop({
     out[key] = value;
     search.set(key, value);
   }
-  if ([...search.keys()].length === 0) return null;
+  // rule 5 (`.23`): a NAVIGATION needs somewhere to go. `tab`, `surface` and `camera` are
+  // modifiers — the handler treats all three as inert without an `id`/`t` (it returns
+  // before it moves anything) — so recovering one of them alone would take the user off
+  // Live, land them on an empty Review page, and consume nothing. Only `id`/`t` are
+  // destinations.
+  if (!out.id && !out.t) return null;
   out.search = search.toString();
   return out;
 }
@@ -257,6 +288,13 @@ const RESOLVE_RANK: Record<string, number> = {
   "review-unavailable": 3,
   "footage-expired": 2,
   "filters-adjusted": 1,
+  // `.23`. Ranked WITH `filters-adjusted` and below the rest, for two reasons. It is the
+  // same class of message — "you got the moment you asked for, but the view is not quite
+  // what the link said" — and it must lose to the two that explain a BLANK screen: a link
+  // whose review is gone, or whose footage has aged out, is not made clearer by being told
+  // which camera we picked. It cannot tie with `filters-adjusted` in practice: that one
+  // only fires on `surface=review`, and `camera=` is ignored there (see `useDeepLink`).
+  "camera-missing": 1,
 };
 
 export function preferResolveProblem(
@@ -279,6 +317,11 @@ export const DEEP_LINK_PROBLEM_TEXT: Record<DeepLinkProblem, string> = {
   // worse than one that names neither.
   "filters-adjusted":
     "This page's filters were adjusted so the linked item is visible.",
+  // Names neither camera on purpose: the string is rendered as-is (no interpolation here),
+  // and "showing the alert's own camera" is the fact the reader needs — which camera the
+  // link asked for is not something they chose or can act on.
+  "camera-missing":
+    "The camera this link asked for is not configured, so the alert's own camera is shown.",
   "invalid-tab": "That view no longer exists — showing the timeline instead.",
   "invalid-time": "That link's timestamp is not valid, so it was ignored.",
   "invalid-surface":
