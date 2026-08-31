@@ -38,6 +38,7 @@ import useSWR from "swr";
 import MotionReviewTimeline from "@/components/timeline/MotionReviewTimeline";
 // fork (continuous timeline seam, handover §8.4 / D4): the three Review-page surfaces
 import {
+  cardOpenStartTime,
   ContinuousOverviewBar,
   ContinuousDedupToggle,
   ContinuousReviewGrid,
@@ -319,15 +320,20 @@ export default function EventView({
         // grid has scrolled far past — applying it opened EVERY card older than 24 h at
         // "24 hours ago" instead of at the review. The clamp only means anything while the
         // calendar is a day FILTER, which the continuous window replaces (D1), so skip it.
-        const effectiveStartTime = continuous.enabled
-          ? review.start_time
-          : timeRange.after > review.start_time
-            ? timeRange.after
-            : review.start_time;
+        //
+        // fork (`.23`): and on the continuous grid the card opens AT the detection, with no
+        // REVIEW_PADDING lead-in — see `seekTarget.ts` for the measurement behind that.
+        // Both rules live in `cardOpenStartTime` so the deep link and the card click cannot
+        // drift apart, and so one L1 matrix covers the whole decision.
+        const effectiveStartTime = cardOpenStartTime({
+          continuous: continuous.enabled,
+          reviewStart: review.start_time,
+          timeRangeAfter: timeRange.after,
+        });
 
         onOpenRecording({
           camera: review.camera,
-          startTime: effectiveStartTime - REVIEW_PADDING,
+          startTime: effectiveStartTime,
           severity: review.severity,
           timelineType: detail ? "detail" : undefined,
         });

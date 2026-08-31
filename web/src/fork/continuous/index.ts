@@ -23,4 +23,9 @@ export {
 } from "./mirrors";
 export { describeMissingFootage } from "./footage";
 export { dayWindowFor } from "./dayNav";
+export {
+  cardOpenStartTime,
+  CONTINUOUS_LEAD_IN,
+  reviewSeekTarget,
+} from "./seekTarget";
 export { dayKeyToStartInTz, sameHour } from "./timeAlign";

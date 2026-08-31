@@ -368,6 +368,11 @@ export default function Events() {
   // scrubber at the review, and hands the provider a TIMESTAMP to navigate to — nothing
   // here writes `{after, before}`, which is what keeps the window continuous under a link
   // (§17.7 #11: you must be able to keep scrolling back from where it dropped you).
+  const configuredCameras = useMemo(
+    () => (config ? Object.keys(config.cameras) : undefined),
+    [config],
+  );
+
   const firstConfiguredCamera = useMemo(() => {
     if (!config) return undefined;
     return Object.keys(config.cameras).sort(
@@ -401,6 +406,12 @@ export default function Events() {
     // which is how upstream picks a default elsewhere. Undefined only on a camera-less
     // config (or before it loads), which the handler reports rather than guessing.
     cameraForMoment: reviewFilter?.cameras?.[0] ?? firstConfiguredCamera,
+    // fork (`.23`): `?camera=` names WHICH camera to open the linked moment on — the
+    // notification carries the detecting (wide) camera's review id, and the useful picture
+    // is the mirrored telephoto's. The handler needs the config's camera list to tell a
+    // renamed/removed camera from a real one; `undefined` while the config loads means
+    // "trust the link" (see `knownCameras`).
+    knownCameras: configuredCameras,
     oldestRecording,
   });
 

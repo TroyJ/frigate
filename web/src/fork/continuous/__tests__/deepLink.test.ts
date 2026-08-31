@@ -7,6 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  DEEP_LINK_PARAMS,
   DEEP_LINK_PROBLEM_TEXT,
   deepLinkFromTop,
   parseDeepLink,
@@ -135,6 +136,111 @@ describe("parseDeepLink", () => {
     for (const p of req?.problems ?? []) {
       expect(DEEP_LINK_PROBLEM_TEXT[p]?.length ?? 0).toBeGreaterThan(10);
     }
+  });
+});
+
+describe("?camera= (`.23`)", () => {
+  it("is carried on the request, alongside the id it modifies", () => {
+    // the shape the Node-RED push gains: the WIDE camera's review id, opened on the
+    // telephoto lens that mirrors it
+    expect(
+      parseDeepLink(
+        { id: "1788166705.391357-3rk76l", camera: "entrance_tele" },
+        NOW,
+      ),
+    ).toEqual({
+      id: "1788166705.391357-3rk76l",
+      t: undefined,
+      tab: "timeline",
+      view: "history",
+      camera: "entrance_tele",
+      problems: [],
+    });
+  });
+
+  it("is a request on its own — owned, so it must be consumed rather than left dangling", () => {
+    // inert (the handler returns before it moves anything), but the param is ours and a
+    // parser that returned undefined would leave it on the URL to re-fire forever
+    expect(parseDeepLink({ camera: "entrance_tele" }, NOW)?.camera).toBe(
+      "entrance_tele",
+    );
+    expect(parseDeepLink({ camera: "  " }, NOW)).toBeUndefined();
+  });
+
+  it("is NOT the `cameras=` filter — the two must never be confused", () => {
+    // `cameras=` is upstream's and changes the filter, which discards the loaded window
+    // (§2A.4 / F14.4). `camera=` only says which lens to open the same moment on.
+    expect(DEEP_LINK_PARAMS).not.toContain("cameras");
+    const link = deepLinkFromTop({
+      ownSearch: "",
+      topHref: `${PANEL}&camera=entrance_tele&cameras=entrance_high`,
+      sameOrigin: true,
+    });
+    expect(link?.camera).toBe("entrance_tele");
+    expect(link?.search).toBe(
+      "id=1788166705.391357-3rk76l&camera=entrance_tele",
+    );
+    expect(link?.search).not.toContain("cameras=");
+  });
+
+  it("is re-emitted in DEEP_LINK_PARAMS order", () => {
+    // the order the recovered search string is built in, which the L2 gates read
+    expect([...DEEP_LINK_PARAMS]).toEqual([
+      "id",
+      "t",
+      "tab",
+      "surface",
+      "camera",
+    ]);
+    const link = deepLinkFromTop({
+      ownSearch: "",
+      topHref: `https://bali.jezcf.com/504b4bcb_frigate-fa/ingress/review?camera=entrance_tele&surface=review&tab=detail&id=abc`,
+      sameOrigin: true,
+    });
+    expect(link?.search).toBe(
+      "id=abc&tab=detail&surface=review&camera=entrance_tele",
+    );
+  });
+
+  it("has wording, so an unknown camera can be reported rather than rendered blank", () => {
+    expect(DEEP_LINK_PROBLEM_TEXT["camera-missing"].length).toBeGreaterThan(10);
+    expect(DEEP_LINK_PROBLEM_TEXT["camera-missing"]).toMatch(/camera/i);
+  });
+});
+
+describe("deepLinkFromTop needs a DESTINATION (`.23` rule 5)", () => {
+  // The reviewer finding: a bare modifier param recovered from the parent's URL navigates
+  // the user off Live to an empty Review page and consumes nothing, because the handler
+  // treats `tab`/`surface`/`camera` without an id/t as inert.
+  it.each(["tab=detail", "surface=review", "camera=entrance_tele"])(
+    "%s alone is not a link",
+    (q) => {
+      expect(
+        deepLinkFromTop({
+          ownSearch: "",
+          topHref: `https://bali.jezcf.com/504b4bcb_frigate-fa/ingress/review?${q}`,
+          sameOrigin: true,
+        }),
+      ).toBeNull();
+    },
+  );
+
+  it("but the same modifier WITH an id or a t still comes through", () => {
+    expect(
+      deepLinkFromTop({
+        ownSearch: "",
+        topHref: `${PANEL}&camera=entrance_tele`,
+        sameOrigin: true,
+      })?.camera,
+    ).toBe("entrance_tele");
+    expect(
+      deepLinkFromTop({
+        ownSearch: "",
+        topHref:
+          "https://bali.jezcf.com/504b4bcb_frigate-fa/ingress/review?t=1788166705&tab=detail",
+        sameOrigin: true,
+      })?.t,
+    ).toBe("1788166705");
   });
 });
 
