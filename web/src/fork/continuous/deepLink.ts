@@ -151,6 +151,99 @@ export function parseDeepLink(
 }
 
 /**
+ * The params this handler owns, in the order they are re-emitted. Anything else on the URL
+ * is upstream's (`cameras`, `labels`, `zones`, `group`) and is NOT carried over from the
+ * parent frame: a notification link does not set them, and inventing them would change the
+ * filter — which discards the loaded window (§2A.4 / F14.4).
+ */
+export const DEEP_LINK_PARAMS = ["id", "t", "tab", "surface"] as const;
+
+export type TopDeepLink = {
+  id?: string;
+  t?: string;
+  tab?: string;
+  surface?: string;
+  /** Query string (no leading `?`) carrying exactly the params above, in DEEP_LINK_PARAMS order. */
+  search: string;
+};
+
+/**
+ * §2A.8 — recover a deep link that HA's ingress dropped on the way in.
+ *
+ * Measured on the box 2026-08-31 (iOS 18.7 Simulator, real HA, `0.17.1-troy.21`): the push
+ * URL is `504b4bcb_frigate-fa/ingress/review?id=<review_id>`, and it opens
+ * `https://bali.jezcf.com/504b4bcb_frigate-fa/ingress/review?id=<id>` — which is HA's panel,
+ * not Frigate. HA keeps that URL in the OUTER location and builds the iframe as
+ * `https://bali.jezcf.com/api/hassio_ingress/<token>//`: the `review?id=` sub-path is
+ * DROPPED. Frigate therefore boots on Live with an in-frame path of `//` and no params at
+ * all, so the tap "does nothing". `/hassio/ingress/<slug>/review?id=` renders no iframe at
+ * all, and no HA route forwards a sub-path — there is no link-only fix, and nothing in the
+ * app can see the link unless it looks at the parent frame.
+ *
+ * The frame and its parent are same-origin (both `bali.jezcf.com`), so `window.top.location`
+ * is readable and equals the outer URL. This function is that read, made pure: everything
+ * that can vary — what our own URL already carries, what the parent's URL is, and whether
+ * the parent is even reachable — is an argument.
+ *
+ * Rules, in order, and each one exists to stop a specific wrong answer:
+ *  1. a cross-origin parent (`sameOrigin: false`, i.e. reading `top.location` threw) is
+ *     "no link", never a guess. Frigate may legitimately be embedded elsewhere.
+ *  2. OUR OWN params win. If the app's URL already carries a link, that is the newer,
+ *     more specific intent — the parent's URL is stale the moment the user navigates
+ *     inside the frame, and it never changes afterwards.
+ *  3. the parent's path must END in `/review`. That is the notification's shape; any other
+ *     panel URL is just "the user opened Frigate", and treating it as a link would hijack
+ *     an ordinary visit.
+ *  4. at least one owned param must be present, or there is nothing to hand over.
+ *
+ * The caller consumes the result ONCE per boot (see `useTopUrlDeepLink`) and never writes to
+ * the parent's history.
+ */
+export function deepLinkFromTop({
+  ownSearch,
+  topHref,
+  sameOrigin,
+}: {
+  /** The app's own query string (`location.search`), with or without the leading `?`. */
+  ownSearch?: string | null;
+  /** `window.top.location.href`, or null if it could not be read. */
+  topHref?: string | null;
+  /** False when reading the parent's location threw — a cross-origin embedder. */
+  sameOrigin: boolean;
+}): TopDeepLink | null {
+  if (!sameOrigin || !topHref) return null;
+
+  // rule 2: our own link wins outright
+  const own = new URLSearchParams(ownSearch ?? "");
+  if (DEEP_LINK_PARAMS.some((k) => (own.get(k) ?? "") !== "")) return null;
+
+  let url: URL;
+  try {
+    url = new URL(topHref);
+  } catch {
+    return null;
+  }
+
+  // rule 3: the notification's shape, `…/ingress/review`. A trailing slash is accepted
+  // because a link written by hand (or normalised by a client) may carry one.
+  const path = url.pathname.replace(/\/+$/, "");
+  if (!path.endsWith("/review")) return null;
+
+  // rule 4: the params, from anywhere in the parent's search string
+  const out: TopDeepLink = { search: "" };
+  const search = new URLSearchParams();
+  for (const key of DEEP_LINK_PARAMS) {
+    const value = url.searchParams.get(key);
+    if (value == null || value === "") continue;
+    out[key] = value;
+    search.set(key, value);
+  }
+  if ([...search.keys()].length === 0) return null;
+  out.search = search.toString();
+  return out;
+}
+
+/**
  * Which resolution problem the user is told about when more than one applies.
  *
  * RANKED, not first-wins. The two can genuinely co-occur — a deep link to an old alert on
