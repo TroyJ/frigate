@@ -293,6 +293,11 @@ export function useContinuousDeepLink({
         if (!camera) {
           // Reachable: `cameraForMoment` falls back to the first configured camera, so this
           // is the genuinely camera-less install (or config not loaded when the link fired).
+          // NOTE (`.25`, reviewer): on that install a `?t=&camera=x` link reports
+          // `review-unavailable` and NOT `camera-missing`, even though `resolveCamera` may
+          // have raised the latter a line earlier — `review-unavailable` outranks it, which
+          // is right: with no camera at all there is nothing to show, and "we picked a
+          // different camera" would be a misleading thing to say about an empty page.
           setResolveProblem((prev) =>
             preferResolveProblem(prev, "review-unavailable"),
           );

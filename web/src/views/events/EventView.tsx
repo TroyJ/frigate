@@ -913,8 +913,15 @@ function DetectionReview({
       return;
     }
 
+    // fork (`.23`/`.25`): the card is found by the start it was OPENED at, and on the
+    // continuous grid that is now `start_time` exactly — `cardOpenStartTime` stopped
+    // subtracting `REVIEW_PADDING`, so upstream's `+ REVIEW_PADDING` matched nothing and
+    // coming back from a recording quietly stopped scrolling the grid to the card you had
+    // just been watching. Upstream's own arithmetic is kept for the non-continuous path.
+    // (Reviewer finding on `.23`; `data-start` is rendered from `review.start_time`, so the
+    // continuous form also avoids upstream's float round-trip through `+ 4`.)
     const element = contentRef.current?.querySelector(
-      `[data-start="${startTime + REVIEW_PADDING}"]`,
+      `[data-start="${continuous.enabled ? startTime : startTime + REVIEW_PADDING}"]`,
     );
     if (element) {
       scrollIntoView(element, {

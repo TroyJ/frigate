@@ -15,7 +15,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { act } from "react";
 import { createRoot, Root } from "react-dom/client";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useNavigate } from "react-router-dom";
 import axios from "axios";
 import { ReviewSegment } from "@/types/review";
 import { REVIEW_PADDING } from "@/types/review";
@@ -56,6 +56,13 @@ type Out = {
 let container: HTMLDivElement;
 let root: Root;
 
+/** A handle on the router, so a test can change the LINK without remounting the hook. */
+let goTo: ((to: string) => void) | null = null;
+function Navigator() {
+  goTo = useNavigate();
+  return null;
+}
+
 function Harness({
   out,
   knownCameras,
@@ -94,6 +101,7 @@ async function run(
   await act(async () => {
     root.render(
       <MemoryRouter initialEntries={[`/review${search}`]}>
+        <Navigator />
         <Harness out={out} {...opts} />
       </MemoryRouter>,
     );
@@ -210,6 +218,28 @@ describe("?camera= chooses the lens (`.23`)", () => {
     });
     expect(out.opens[0].camera).toBe("entrance_high");
     expect(out.problem).toBe("camera-missing");
+  });
+
+  it("is part of the de-dupe key: the same id with a NEW camera resolves again", async () => {
+    // `handled` keys the once-per-link guard on the request. If `camera` were left out of
+    // it, `?id=X` followed by `?id=X&camera=entrance_tele` — the same review, a different
+    // lens, which is exactly what a second push or a hand-edited link looks like — would be
+    // silently dropped as "already handled". Same MOUNTED hook throughout: a remount would
+    // reset the guard and prove nothing. (Reviewer item on `.23`.)
+    const out = await run(`?id=${REVIEW.id}`, { knownCameras: CAMERAS });
+    expect(out.opens.map((o) => o.camera)).toEqual(["entrance_high"]);
+    await act(async () => {
+      goTo?.(`/review?id=${REVIEW.id}&camera=entrance_tele`);
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(
+      out.opens.map((o) => o.camera),
+      "the second link must resolve, on the camera it named",
+    ).toEqual(["entrance_high", "entrance_tele"]);
+    expect(out.opens[1].startTime).toBe(REVIEW.start_time);
   });
 
   it("alone is inert — it names a lens, it is not a destination", async () => {
