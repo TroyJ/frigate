@@ -361,7 +361,7 @@ describe("the bridge follows the parent's in-page navigations (`.24`)", () => {
     );
   });
 
-  it("swallows a BURST of location-changed on one href, then honours a re-tap (`.25`)", async () => {
+  it("swallows a BURST of location-changed on one href, then honours a re-tap (`.25`)", () => {
     // The `.24` review's MAJOR. HA's own `navigate()` has no same-URL short-circuit
     // (`_external-repos/ha-frontend/src/common/navigate.ts`: it always pushes and always
     // fires), and this bridge never writes the parent — so the panel URL stays at
@@ -371,27 +371,31 @@ describe("the bridge follows the parent's in-page navigations (`.24`)", () => {
     mount();
     expect(top.navigateTop(PANEL)).toBe("/review?id=1788166705.391357-3rk76l");
 
-    // in-app: the handler consumes the params, so the app leaves the link URL
-    act(() => {
-      window.dispatchEvent(new Event("pageshow"));
-    });
-    // …a second event on the SAME href inside the burst window changes nothing
-    const before = where();
-    expect(top.fire()).toBe(before);
-
-    // …and outside it, the same href is honoured again — that is the re-tap
-    await new Promise((r) => setTimeout(r, 550));
+    // INSIDE the window: the user has browsed on, and a repeat event must NOT drag them
+    // back. Asserting from `/elsewhere` is the whole point — asserting while still on the
+    // review cannot fail, because "did nothing" and "re-navigated to the same place" look
+    // identical. (Reviewer: with `BURST_WINDOW_MS = 0` the old form stayed green.)
     navigatedAway();
+    expect(top.fire()).toBe("/elsewhere");
+
+    // OUTSIDE it, the same href is honoured again — that is the re-tap. The clock is moved
+    // rather than slept through; `ageBurst` leaves the href key untouched.
+    resetTopDeepLinkForTests({ keepSession: true, ageBurst: true });
     expect(top.fire()).toBe("/review?id=1788166705.391357-3rk76l");
   });
 
-  it("a popstate on an unchanged href stays keyed — HA closes dialogs with history.back()", () => {
-    // `ensureDialogsClosed` in HA's navigate.ts goes back to dismiss a dialog; that arrives
-    // here as a popstate carrying no new intent, and must not re-open the notification
+  it("a popstate on an unchanged href stays keyed — HA goes back to close a dialog", () => {
+    // `make-dialog-manager.ts:255` calls `history.back()` to dismiss a dialog; that arrives
+    // here as a popstate carrying no new intent, and must not re-open the notification.
+    //
+    // The clock is aged FIRST so the burst window cannot be what makes this pass — without
+    // that, rewiring `popstate` to the navigation handler left the test green and the
+    // classification was never actually pinned (reviewer).
     const top = fakeTop(FRAME);
     mount();
     expect(top.navigateTop(PANEL)).toBe("/review?id=1788166705.391357-3rk76l");
     navigatedAway();
+    resetTopDeepLinkForTests({ keepSession: true, ageBurst: true });
     expect(top.fire("popstate")).toBe("/elsewhere");
   });
 

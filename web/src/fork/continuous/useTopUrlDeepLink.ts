@@ -39,9 +39,16 @@
  * Two hard rules:
  *  - **`.25` trade-off, stated because it is not obvious:** the href key is bypassed for a
  *    deliberate `location-changed` and for nothing else. That is what makes a re-tap of the
- *    SAME notification work — the bridge never writes the parent, so HA's panel URL stays
- *    at `…/review?id=A` all session and a second tap on A produces a byte-identical href.
- *    The cost is that a `location-changed` burst could re-seek; a 500 ms window bounds it.
+ *    SAME notification work **while the Frigate panel stays open** — the bridge never writes
+ *    the parent, so HA's panel URL stays at `…/review?id=A` and a second tap on A produces a
+ *    byte-identical href. The cost is that a `location-changed` burst could re-seek; a
+ *    500 ms window bounds it.
+ *
+ *    **What a re-tap does NOT survive: switching HA panels in between.** Leaving Frigate
+ *    destroys the iframe, so coming back is a fresh boot, and `attempt("boot")` keeps the
+ *    key — which `sessionStorage` preserved across the iframe's death (same origin, same
+ *    tab) — so the app lands on Live rather than replaying an alert already dealt with.
+ *    That is the `.23` trade-off, deliberately unchanged: a NEW notification always lands.
  *  - consume ONCE PER LINK — per LINK, not per boot, which is why the key is the href and
  *    not a boolean. A module-level flag was not enough (`.23` reviewer finding, MAJOR): it
  *    covers a remount, but anything that REBOOTS the app inside the frame —
@@ -123,7 +130,18 @@ function markConsumed(href: string) {
  * what a reload does to this module's state, and it is the case the whole `.23` change is
  * about, so it has to be reachable.
  */
-export function resetTopDeepLinkForTests({ keepSession = false } = {}) {
+export function resetTopDeepLinkForTests({
+  keepSession = false,
+  ageBurst = false,
+} = {}) {
+  // `ageBurst`: leave the href key exactly as it is and only move the CLOCK back past the
+  // burst window. Without it the only way to test the far side of the window is a real
+  // 550 ms sleep, which is slow and — worse — makes the near side of the window untestable,
+  // because "still on the review" is also what a working re-fire looks like.
+  if (ageBurst) {
+    lastHandledAt = 0;
+    return;
+  }
   lastHandledHref = null;
   lastHandledAt = 0;
   if (keepSession) return;
@@ -220,8 +238,10 @@ export function useTopUrlDeepLink() {
       //
       // Every other source keeps the key, and each for a concrete reason:
       //   boot        — an in-frame reload must not replay a notification already dealt with
-      //   popstate    — HA closes dialogs with `history.back()` (`ensureDialogsClosed`, same
-      //                 file), which arrives here as a popstate on an UNCHANGED href
+      //   popstate    — HA goes back on paths that carry no new intent: closing a dialog
+      //                 (`dialogs/make-dialog-manager.ts:255`) and `goBack`
+      //                 (`common/navigate.ts:93`) both land here as a popstate on an
+      //                 UNCHANGED href
       //   recheck     — `pageshow`/`visibilitychange` are "we may have missed something"
       //                 polls, not user intent; re-firing on them would yank the user back
       //                 every time they switch apps
@@ -264,8 +284,9 @@ export function useTopUrlDeepLink() {
     if (parent) {
       try {
         parent.addEventListener("location-changed", onNavigation);
-        // NOT `navigation`: a popstate is as likely to be HA closing a dialog with
-        // `history.back()` as it is a real back/forward, and it carries no new intent.
+        // NOT `navigation`: a popstate is as likely to be HA closing a dialog
+        // (`make-dialog-manager.ts:255` calls `history.back()`) as a real back/forward, and
+        // it carries no new intent.
         parent.addEventListener("popstate", onRecheck);
       } catch {
         // an embedder that refuses listeners is simply "no link", as ever

@@ -135,6 +135,18 @@ describe("the card click goes through this module", () => {
     expect(code).toMatch(/cardOpenStartTime\(\{/);
   });
 
+  it("finds the card again by the start it was OPENED at (`.25` scroll restore)", () => {
+    // Returning from a recording scrolls the grid back to the card you were watching, by
+    // looking it up with `data-start`. Upstream pairs `+ REVIEW_PADDING` with its own
+    // `- REVIEW_PADDING` open; `.23` stopped subtracting on the continuous path, so the
+    // selector matched nothing and the grid quietly stopped scrolling. Reverting this line
+    // changes no other test — hence the grep. (Reviewer item on `.25`.)
+    expect(code).toMatch(
+      /\[data-start="\$\{continuous\.enabled \? startTime : startTime \+ REVIEW_PADDING\}"\]/,
+    );
+    expect(code).not.toContain('[data-start="${startTime + REVIEW_PADDING}"]');
+  });
+
   it("no longer subtracts REVIEW_PADDING when it opens a card", () => {
     // the exact line this change replaces — its return would silently restore the 4 s
     expect(code).not.toContain(
