@@ -88,6 +88,34 @@ describe("cardOpenStartTime (the Review-grid card click)", () => {
   });
 });
 
+describe("History's events list goes through this module too (`.24`)", () => {
+  const src = readFileSync(
+    resolve(__dirname, "../ContinuousTimelinePanel.tsx"),
+    "utf8",
+  )
+    .replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}/g, "")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+
+  it("the events-list card click seeks to start_time, not start_time - REVIEW_PADDING", () => {
+    // the same gesture as the grid, on the surface a `?id=&tab=events` link lands on: with
+    // the padding, tapping the alert beside the player moved the playhead 4 s BACKWARDS
+    // from where the link had put it
+    expect(src).toMatch(
+      /onSelect=\{\(review\)\s*=>\s*manuallySetCurrentTime\(\s*reviewSeekTarget\(review\.start_time\)/,
+    );
+    expect(src).not.toContain(
+      "manuallySetCurrentTime(review.start_time - REVIEW_PADDING",
+    );
+  });
+
+  it("still keeps REVIEW_PADDING for the playhead-inside-review tolerance", () => {
+    // that one is a TOLERANCE, not a seek: tightening it would make a review stop being
+    // "current" 4 s early
+    expect(src).toContain("rev.start_time - REVIEW_PADDING < currentTime");
+  });
+});
+
 describe("the card click goes through this module", () => {
   const src = readFileSync(
     resolve(__dirname, "../../../views/events/EventView.tsx"),

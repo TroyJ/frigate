@@ -8,9 +8,15 @@
  * of the clip spent on an empty driveway, and the person the alert is about arrives after
  * the viewer has already decided nothing is happening.
  *
- * So for the two paths that answer "show me THIS alert" — the deep link's `?id=` handler
- * and a card click on the continuous Review grid — the lead-in is ZERO: seek to
- * `start_time` exactly and let the keyframe snap be the only lead-in there is.
+ * So for every path that answers "show me THIS alert" the lead-in is ZERO — seek to
+ * `start_time` exactly and let the keyframe snap be the only lead-in there is. There are
+ * three of them, and they must agree, because a link lands on one and the user's next tap
+ * is often another:
+ *   - the deep link's `?id=` handler (`useDeepLink.ts`)
+ *   - a card click on the continuous Review grid (`EventView.tsx`'s `onSelectReview`)
+ *   - a card click in History's events list, beside the player
+ *     (`ContinuousTimelinePanel.tsx` → `ContinuousEventList` `onSelect`) — added in `.24`
+ *     after a review found the playhead jumping 4 s BACK from where a link had put it.
  *
  * What this deliberately does NOT change (REVIEW_PADDING stays exactly as upstream has it):
  *   - preview scrubbing (`PREVIEW_PADDING`) and thumbnails
@@ -20,7 +26,7 @@
  *     tightening them would make a review stop being "current" 4 s early
  *   - upstream's own non-continuous `useSearchEffect("id")` path in `pages/Events.tsx`
  *   - the timeline panel's review-band click and `AnimatedEventCard` — different gestures,
- *     not the notification path, and out of scope for `.23`
+ *     not the notification path, and out of scope
  */
 import { REVIEW_PADDING } from "@/types/review";
 
