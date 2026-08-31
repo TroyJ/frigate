@@ -286,7 +286,13 @@ ENV S6_CMD_WAIT_FOR_SERVICES_MAXTIME=0
 ENTRYPOINT ["/init"]
 CMD []
 
-HEALTHCHECK --start-period=300s --start-interval=5s --interval=15s --timeout=5s --retries=3 \
+# D16/F21 — widened from `--timeout=5s --retries=3`. Keep probing the app (a static path
+# would report healthy with Frigate dead), but `/api/version` traverses nginx's
+# `auth_request` into the single uvicorn worker: block that worker for ~45 s and Docker
+# marks the container unhealthy, whereupon the Supervisor watchdog recreates the add-on —
+# a ~40 s camera outage (measured 2026-08-26). 10 s x 6 tolerates ~2 min, so a slow API
+# degrades instead of restarting. Do not lower these without re-reading F21.
+HEALTHCHECK --start-period=300s --start-interval=5s --interval=15s --timeout=10s --retries=6 \
     CMD test -f /dev/shm/.frigate-is-stopping && exit 0; curl --fail --silent --show-error http://127.0.0.1:5000/api/version || exit 1
 
 # Frigate deps with Node.js and NPM for devcontainer
