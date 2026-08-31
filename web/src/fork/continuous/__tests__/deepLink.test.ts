@@ -8,6 +8,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEEP_LINK_PROBLEM_TEXT,
+  deepLinkFromTop,
   parseDeepLink,
   preferResolveProblem,
   parseMoment,
@@ -164,5 +165,156 @@ describe("preferResolveProblem (m4)", () => {
     expect(preferResolveProblem(undefined, "filters-adjusted")).toBe(
       "filters-adjusted",
     );
+  });
+});
+
+/**
+ * §2A.8 — the link HA's ingress drops.
+ *
+ * `PANEL` is the URL measured on the box: what the phone actually opens when the push is
+ * tapped. `FRAME` is what HA then builds for the add-on iframe — note it carries neither the
+ * `/review` path nor the params, which is the entire defect.
+ */
+const PANEL =
+  "https://bali.jezcf.com/504b4bcb_frigate-fa/ingress/review?id=1788166705.391357-3rk76l";
+const FRAME = "https://bali.jezcf.com/api/hassio_ingress/abc123//";
+
+describe("deepLinkFromTop", () => {
+  it("takes the params off the parent frame's URL", () => {
+    const link = deepLinkFromTop({
+      ownSearch: "",
+      topHref: PANEL,
+      sameOrigin: true,
+    });
+    expect(link).not.toBeNull();
+    expect(link?.id).toBe("1788166705.391357-3rk76l");
+    expect(link?.search).toBe("id=1788166705.391357-3rk76l");
+  });
+
+  it("carries every param it owns, from anywhere in the parent's search", () => {
+    const link = deepLinkFromTop({
+      ownSearch: "",
+      topHref: `${PANEL}&tab=detail&surface=review&t=1788166705&group=front`,
+      sameOrigin: true,
+    });
+    expect(link?.tab).toBe("detail");
+    expect(link?.surface).toBe("review");
+    expect(link?.t).toBe("1788166705");
+    // upstream's own filter params are NOT carried over — changing a filter discards the
+    // loaded window (§2A.4 / F14.4), and a notification link never sets one
+    expect(link?.search).not.toContain("group");
+  });
+
+  it("returns null when the parent is cross-origin", () => {
+    // the read threw: Frigate is embedded somewhere that is not Home Assistant
+    expect(
+      deepLinkFromTop({ ownSearch: "", topHref: null, sameOrigin: false }),
+    ).toBeNull();
+    // …and a href that somehow survived must still not be trusted
+    expect(
+      deepLinkFromTop({ ownSearch: "", topHref: PANEL, sameOrigin: false }),
+    ).toBeNull();
+  });
+
+  it("lets our OWN params win over the parent's", () => {
+    // the user navigated inside the frame: the parent's URL is stale from that moment on
+    expect(
+      deepLinkFromTop({
+        ownSearch: "?id=other-review",
+        topHref: PANEL,
+        sameOrigin: true,
+      }),
+    ).toBeNull();
+    // any owned param counts, with or without the leading `?`
+    expect(
+      deepLinkFromTop({
+        ownSearch: "tab=events",
+        topHref: PANEL,
+        sameOrigin: true,
+      }),
+    ).toBeNull();
+    // an EMPTY value is not a link — it must not block the recovery
+    expect(
+      deepLinkFromTop({ ownSearch: "?id=", topHref: PANEL, sameOrigin: true }),
+    ).not.toBeNull();
+    // someone else's param does not block it either
+    expect(
+      deepLinkFromTop({
+        ownSearch: "?group=front",
+        topHref: PANEL,
+        sameOrigin: true,
+      }),
+    ).not.toBeNull();
+  });
+
+  it("returns null when the parent is not a /review link", () => {
+    // the iframe URL HA actually builds — no path, no params
+    expect(
+      deepLinkFromTop({ ownSearch: "", topHref: FRAME, sameOrigin: true }),
+    ).toBeNull();
+    // the panel with no sub-path: the user simply opened Frigate
+    expect(
+      deepLinkFromTop({
+        ownSearch: "",
+        topHref: "https://bali.jezcf.com/504b4bcb_frigate-fa/ingress",
+        sameOrigin: true,
+      }),
+    ).toBeNull();
+    // a different sub-path, even carrying an id, is not ours to hijack
+    expect(
+      deepLinkFromTop({
+        ownSearch: "",
+        topHref:
+          "https://bali.jezcf.com/504b4bcb_frigate-fa/ingress/explore?id=x",
+        sameOrigin: true,
+      }),
+    ).toBeNull();
+    // `/review` must be a whole path segment
+    expect(
+      deepLinkFromTop({
+        ownSearch: "",
+        topHref: "https://bali.jezcf.com/notreview?id=x",
+        sameOrigin: true,
+      }),
+    ).toBeNull();
+  });
+
+  it("accepts a trailing slash on the parent's path", () => {
+    expect(
+      deepLinkFromTop({
+        ownSearch: "",
+        topHref:
+          "https://bali.jezcf.com/504b4bcb_frigate-fa/ingress/review/?id=abc",
+        sameOrigin: true,
+      })?.id,
+    ).toBe("abc");
+  });
+
+  it("returns null when there is nothing to hand over", () => {
+    // right path, no params — that is a visit, not a link
+    expect(
+      deepLinkFromTop({
+        ownSearch: "",
+        topHref: "https://bali.jezcf.com/504b4bcb_frigate-fa/ingress/review",
+        sameOrigin: true,
+      }),
+    ).toBeNull();
+    // only params we do not own
+    expect(
+      deepLinkFromTop({
+        ownSearch: "",
+        topHref:
+          "https://bali.jezcf.com/504b4bcb_frigate-fa/ingress/review?group=front",
+        sameOrigin: true,
+      }),
+    ).toBeNull();
+    // an unparseable href is "no link", never a throw
+    expect(
+      deepLinkFromTop({
+        ownSearch: "",
+        topHref: "not a url",
+        sameOrigin: true,
+      }),
+    ).toBeNull();
   });
 });

@@ -16,6 +16,7 @@ import useSWR from "swr";
 import { FrigateConfig } from "./types/frigateConfig";
 import ActivityIndicator from "@/components/indicators/activity-indicator";
 import { isRedirectingToLogin } from "@/api/auth-redirect";
+import { ContinuousTopLinkBridge } from "@/fork/continuous/useTopUrlDeepLink";
 
 const Live = lazy(() => import("@/pages/Live"));
 const Events = lazy(() => import("@/pages/Events"));
@@ -40,6 +41,13 @@ function App() {
       <AuthProvider>
         <BrowserRouter basename={window.baseUrl}>
           <Wrapper>
+            {/* fork (continuous timeline, §2A.8): a notification tap arrives as
+                `<slug>/ingress/review?id=…` on HOME ASSISTANT's panel, and HA builds the
+                add-on iframe without that sub-path — Frigate boots on Live and the link is
+                lost. This bridge reads the (same-origin) parent URL once per boot and turns
+                it into a normal in-app navigation to `/review?…`, after which the existing
+                deep-link handler runs on our own URL, unchanged. */}
+            <ContinuousTopLinkBridge />
             {config?.safe_mode ? <SafeAppView /> : <DefaultAppView />}
           </Wrapper>
         </BrowserRouter>
