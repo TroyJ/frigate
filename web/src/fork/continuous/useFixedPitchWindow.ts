@@ -47,6 +47,16 @@ export type FixedPitchWindow = {
       align?: "start" | "center";
       behavior?: ScrollBehavior;
       ifNeeded?: boolean;
+      /**
+       * Skip the scroll when the target is NOT already near the viewport.
+       *
+       * The inverse of `ifNeeded`, and the two answer different questions. `ifNeeded` asks
+       * "is it already comfortably on screen, so moving would be a pointless yank?".
+       * `onlyIfVisible` asks "is the caller allowed to drag the viewport somewhere the user
+       * did not ask to go?" — for an automatic follow the answer is no. See the strip-reset
+       * comment in `ContinuousMotionStrip`.
+       */
+      onlyIfVisible?: boolean;
     },
   ) => void;
   refresh: () => void;
@@ -181,6 +191,18 @@ export function useFixedPitchWindow({
         if (
           target > scrollTop + OVERSCAN_COUNT * SEGMENT_HEIGHT &&
           target < scrollTop + clientHeight - OVERSCAN_COUNT * SEGMENT_HEIGHT
+        ) {
+          return;
+        }
+      }
+      // One viewport of slack on each side, so a playhead that has just drifted off the edge
+      // is still followed — that is the case the follow exists for — while one that is days
+      // away is not chased.
+      if (opts?.onlyIfVisible) {
+        const { scrollTop, clientHeight } = el;
+        if (
+          target < scrollTop - clientHeight ||
+          target > scrollTop + 2 * clientHeight
         ) {
           return;
         }

@@ -247,11 +247,55 @@ export function ContinuousMotionStrip({
     [gaps],
   );
 
+  /**
+   * THE STRIP-RESET FIX. An automatic handlebar follow is honoured once per handlebar
+   * position; a repeat of the same position is ignored.
+   *
+   * Upstream's `use-draggable-element` keeps the handlebar on screen with
+   *
+   *   useEffect(() => { … if (!userInteracting) scrollToSegment(alignedSegmentTime); … },
+   *             [draggableElementTime, …, segments]);
+   *
+   * `segments` is in the deps and its ARRAY IDENTITY changes every time a review/motion page
+   * lands, so the follow re-runs on data arrival with an UNCHANGED handlebar. On upstream's
+   * bounded 24 h timeline that is invisible — the handlebar is a screen away at worst. On a
+   * continuous strip it is a yank from wherever you were reading back to the playhead, which
+   * for a live camera is `now`, i.e. `scrollTop = 0`.
+   *
+   * `userInteracting` does not save it: `use-user-interaction` clears the flag **3 s after
+   * the last scroll event**, so any pause longer than that re-arms the follow. That is the
+   * whole mechanism behind both observations — LAN dev loop 2026-08-31, scrollTop 645,154 →
+   * 0 within ~5 s of the deep scroll and 12 more times when re-scrolled (pages were landing
+   * every few seconds while the window chained); and the box on `.19`, 2026-08-28, 745,076 →
+   * 0 after ~3 untouched minutes through ingress, where pages only arrive on the 30 s tail
+   * poll. Same effect, different arrival rate. Attributed with a probe that patched the
+   * scroller's `scrollTop` setter and `scrollTo` and captured stacks: 378 of 379 moves came
+   * through this callback from `use-draggable-element`, and the element never remounted.
+   *
+   * The follow's INTENT is "keep the playhead VISIBLE as it advances". It was never "put the
+   * playhead on screen from wherever the user happens to be" — on a 24 h timeline those are
+   * the same sentence and on a 35-day one they are opposites. So the automatic follow is
+   * allowed to adjust the viewport only when its target is already within a viewport of the
+   * screen (`onlyIfVisible`); a playhead days away is left alone until the user goes to it.
+   *
+   * Deduping on the handlebar TIME instead was tried first and does not work: the handlebar
+   * tracks the live edge, so every call carries a new time and every one is honoured
+   * (measured — 376 of 377 moves still landed at `top: 0`).
+   *
+   * Scoped to the automatic path only (`ifNeeded === undefined`, which is exactly what
+   * `use-draggable-element` passes). This strip's own callers are explicit — the zoom
+   * re-centre passes `true` — and the copied `MotionSegment`'s minimap call is dead here
+   * (`showMinimap={false}`).
+   */
   const scrollToSegment = useCallback(
     (segmentTime: number, ifNeeded?: boolean, behavior?: ScrollBehavior) => {
       const index = Math.round((startAligned - segmentTime) / segmentDuration);
       if (index < 0 || index >= count) return;
-      win.scrollToIndex(index, { ifNeeded, behavior });
+      win.scrollToIndex(index, {
+        ifNeeded,
+        behavior,
+        onlyIfVisible: ifNeeded === undefined,
+      });
     },
     [startAligned, segmentDuration, count, win],
   );

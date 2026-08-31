@@ -144,7 +144,19 @@ export function ContinuousEventStrip({
       // guard band at each edge — i.e. exactly when centring would have been a visible
       // yank for no reason — and still fires as the handle approaches an edge, which is
       // the case that matters. Revisit if dragging ever feels like it stops following.
-      win.scrollToIndex(index, { ifNeeded: ifNeeded ?? true, behavior });
+      // …and the AUTOMATIC follow may not drag the viewport to a playhead the user has
+      // scrolled away from. `ifNeeded` is not enough on its own: it only suppresses a scroll
+      // whose target is already on screen, and the yank being fixed here has the target far
+      // OFF screen. Upstream re-runs the follow whenever `segments` changes identity — every
+      // page landing — so on a continuous strip a data arrival scrolls the user home. Same
+      // mechanism and same fix as `ContinuousMotionStrip`; read the long comment there.
+      // `ifNeeded === undefined` is exactly `use-draggable-element`'s call shape, so this
+      // strip's own explicit callers are untouched.
+      win.scrollToIndex(index, {
+        ifNeeded: ifNeeded ?? true,
+        behavior,
+        onlyIfVisible: ifNeeded === undefined,
+      });
     },
     [startAligned, segmentDuration, count, win],
   );
