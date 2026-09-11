@@ -1,0 +1,57 @@
+From: TroyJ/frigate (bali-home-assistant fork)
+Date: 2026-09-11
+Subject: [PATCH] avcodec/hevc: release generated missing references when the DPB is cleared
+
+Fixes a decoder state that never recovers, seen live on the Frigate box every
+few mornings after the 05:00 router power-cycle forced ffmpeg to reattach to
+the camera's RTSP stream mid-GOP.
+
+Mechanism (libavcodec/hevc, FFmpeg 7.1.x, software AND hwaccel paths):
+
+  1. A non-IRAP frame arrives before its IDR. add_candidate_ref() cannot find
+     the reference (POC 0 for a fresh coded sequence) and calls
+     generate_missing_ref(), which puts a placeholder frame carrying that POC
+     into the DPB with HEVC_FRAME_FLAG_UNAVAILABLE. Under hwaccel the
+     placeholder's pixel buffer is left untouched (all zero = green on a
+     V4L2-request decoder, which also cannot find the placeholder's timestamp
+     and silently substitutes the destination buffer).
+  2. The placeholder is only released by unref_missing_refs() at the top of
+     ff_hevc_frame_rps(), which runs AFTER ff_hevc_set_new_ref().
+  3. The IDR arrives. hevc_frame_start() calls ff_hevc_clear_refs(), which
+     strips only SHORT_REF/LONG_REF, so the placeholder survives with
+     UNAVAILABLE set. ff_hevc_set_new_ref() then finds a DPB frame whose POC
+     equals the IDR's ("Duplicate POC in a sequence: 0") and the IDR is
+     skipped ("Skipping invalid undecodable NALU: 19").
+  4. The next non-IRAP frame regenerates the placeholder ("Could not find ref
+     with POC 0"), and the loop repeats for every keyframe for the life of the
+     process. Observed for 16 hours straight; only a new process recovers.
+
+Reproduced offline by removing the first IDR from any recorded HEVC segment:
+vanilla FFmpeg n7.1.2 (software) stays 100% placeholder-grey through six
+keyframes; rpi-ffmpeg 7.1.2 on the Pi 4 hardware path stays 100% green.
+With this patch both recover at the first surviving keyframe; a stream that
+starts on a keyframe is unaffected. FFmpeg 8.0 no longer decodes non-IRAP
+frames with missing references at all (bc1a3bfd2c), which sidesteps the
+loop, but the Pi fork has no released 8.x branch.
+
+A placeholder has no meaning across a DPB clear (IDR, or SPS change), so
+release it there too.
+
+Not submitted upstream by decision (2026-09-11).
+---
+ libavcodec/hevc/refs.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/libavcodec/hevc/refs.c b/libavcodec/hevc/refs.c
+--- a/libavcodec/hevc/refs.c
++++ b/libavcodec/hevc/refs.c
+@@ -67,7 +67,8 @@ void ff_hevc_clear_refs(HEVCLayerContext *l)
+     for (i = 0; i < FF_ARRAY_ELEMS(l->DPB); i++)
+         ff_hevc_unref_frame(&l->DPB[i],
+                             HEVC_FRAME_FLAG_SHORT_REF |
+-                            HEVC_FRAME_FLAG_LONG_REF);
++                            HEVC_FRAME_FLAG_LONG_REF |
++                            HEVC_FRAME_FLAG_UNAVAILABLE);
+ }
+ 
+ void ff_hevc_flush_dpb(HEVCContext *s)

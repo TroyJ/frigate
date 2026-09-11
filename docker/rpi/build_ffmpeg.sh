@@ -17,6 +17,19 @@
 # /dev/dma_heap/default_cma_region only, and the add-on container's /dev is
 # read-only so it cannot be aliased at runtime; falling through to "reserved"
 # (5 MiB) fails with ENOMEM. Add default_cma_region ahead of reserved.
+#
+# Patch 2 (docker/rpi/patches/hevc-clear-missing-refs-on-idr.patch): libavcodec's
+# HEVC decoder in 7.1.x never recovers once it has started on a P-frame whose IDR
+# it has not seen — the generated "missing reference" placeholder carries the
+# IDR's POC, survives ff_hevc_clear_refs(), and makes every later IDR fail the
+# duplicate-POC check, so keyframes are skipped for the life of the process
+# (on the V4L2-request path that is a solid-green picture). Seen live after the
+# 05:00 router power-cycle reconnects; reproduced by stripping the first IDR from
+# any recorded segment. The patch header carries the full mechanism and evidence;
+# bali-home-assistant/frigate-fork/docs/hevc-decoder-poisoning.md the analysis.
+# Applied with `git apply` from /deps/patches (bind-mounted by the Dockerfiles);
+# the build fails loudly if the patch no longer applies, so a future bump of
+# RPI_FFMPEG_COMMIT must re-validate it (or confirm the 8.x behaviour, see doc).
 set -euxo pipefail
 
 RPI_FFMPEG_REPO="https://github.com/jc-kynesim/rpi-ffmpeg.git"
@@ -40,11 +53,18 @@ sed -i 's|        "/dev/dma_heap/reserved",|        "/dev/dma_heap/default_cma_r
     libavcodec/v4l2_req_dmabufs.c
 grep -c 'default_cma_region' libavcodec/v4l2_req_dmabufs.c | grep -qx 2
 
+# HEVC missing-reference poisoning patch (see header, patch 2).
+PATCH_DIR="${PATCH_DIR:-/deps/patches}"
+git apply --check "${PATCH_DIR}/hevc-clear-missing-refs-on-idr.patch"
+git apply "${PATCH_DIR}/hevc-clear-missing-refs-on-idr.patch"
+grep -c 'HEVC_FRAME_FLAG_UNAVAILABLE);' libavcodec/hevc/refs.c | grep -qx 1
+
 ./configure --prefix="${PREFIX}" \
     --enable-gpl --enable-nonfree --disable-debug --disable-doc \
     --enable-libdrm --enable-v4l2-request --enable-libudev --enable-sand --enable-libv4l2 \
     --enable-libx264 --enable-libopus --enable-openssl \
     --disable-static --enable-shared --enable-rpath
+grep -E '^(CFLAGS|CC)=' ffbuild/config.mak   # ISA audit: no -march/-mcpu of the build host
 make -j"$(nproc)"
 make install
 rm -rf "${PREFIX}/include" "${PREFIX}/share" "${PREFIX}/lib/pkgconfig"

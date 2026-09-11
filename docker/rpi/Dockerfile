@@ -7,6 +7,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 # for why the APT package is not used).
 FROM debian:12 AS rpi-ffmpeg-build
 RUN --mount=type=bind,source=docker/rpi/build_ffmpeg.sh,target=/deps/build_ffmpeg.sh \
+    --mount=type=bind,source=docker/rpi/patches,target=/deps/patches \
     /deps/build_ffmpeg.sh
 
 FROM deps AS rpi-deps
