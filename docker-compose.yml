@@ -14,14 +14,14 @@ services:
       dockerfile: docker/main/Dockerfile
       # Use target devcontainer-trt for TensorRT dev
       target: devcontainer
-      # The same switches as the Raspberry Pi image (docker/rpi/rpi.hcl): no Hailo, no
-      # MemryX, no generic ffmpeg builds, no OpenVINO model. The tests then run against what
-      # the Pi image installs, and every download is one of our copies. Remove these four
-      # lines to develop with those runtimes.
+      # Leave out what the Raspberry Pi image leaves out (docker/rpi/rpi.hcl): no Hailo, no
+      # MemryX, no OpenVINO model, so the tests run against the Pi's runtimes and every
+      # download is one of our copies. The generic ffmpeg builds stay (the Pi image has its
+      # own ffmpeg instead; go2rtc's start script needs one). Remove these lines to develop
+      # with those runtimes.
       args:
         INSTALL_HAILO: "false"
         INSTALL_MEMRYX: "false"
-        INSTALL_GENERIC_FFMPEG: "false"
         OPENVINO_MODEL: "skip"
     ## Uncomment this block for nvidia gpu support
     # deploy:

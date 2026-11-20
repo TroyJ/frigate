@@ -65,14 +65,18 @@ if [[ "${TARGETARCH}" == "amd64" && "${INSTALL_GENERIC_FFMPEG:-true}" == "true" 
     rm -rf ffmpeg.tar.xz
 fi
 
-# ffmpeg -> arm64
+# ffmpeg -> arm64 (our copies, checked by sha256; originals:
+#   https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2022-07-31-12-37/ffmpeg-n5.1-2-g915ef932a3-linuxarm64-gpl-5.1.tar.xz
+#   https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2024-09-19-12-51/ffmpeg-n7.0.2-18-g3e6cec1286-linuxarm64-gpl-7.0.tar.xz)
 if [[ "${TARGETARCH}" == "arm64" && "${INSTALL_GENERIC_FFMPEG:-true}" == "true" ]]; then
     mkdir -p /usr/lib/ffmpeg/5.0
-    wget -qO ffmpeg.tar.xz "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2022-07-31-12-37/ffmpeg-n5.1-2-g915ef932a3-linuxarm64-gpl-5.1.tar.xz"
+    wget -qO ffmpeg.tar.xz "https://github.com/TroyJ/frigate-build-deps/releases/download/ffmpeg-builds-arm64/ffmpeg-n5.1-2-g915ef932a3-linuxarm64-gpl-5.1.tar.xz"
+    echo "57ee475407bad49910ba9b946428396e30cf075ea28a7912fbe1aa2578085af0  ffmpeg.tar.xz" | sha256sum -c -
     tar -xf ffmpeg.tar.xz -C /usr/lib/ffmpeg/5.0 --strip-components 1 arm64/bin/ffmpeg arm64/bin/ffprobe
     rm -f ffmpeg.tar.xz
     mkdir -p /usr/lib/ffmpeg/7.0
-    wget -qO ffmpeg.tar.xz "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2024-09-19-12-51/ffmpeg-n7.0.2-18-g3e6cec1286-linuxarm64-gpl-7.0.tar.xz"
+    wget -qO ffmpeg.tar.xz "https://github.com/TroyJ/frigate-build-deps/releases/download/ffmpeg-builds-arm64/ffmpeg-n7.0.2-18-g3e6cec1286-linuxarm64-gpl-7.0.tar.xz"
+    echo "16c8b04e9d0ea9c769ad964c4c453fcf05121a1947237329d2e9d8a5e43e2a3c  ffmpeg.tar.xz" | sha256sum -c -
     tar -xf ffmpeg.tar.xz -C /usr/lib/ffmpeg/7.0 --strip-components 1 arm64/bin/ffmpeg arm64/bin/ffprobe
     rm -f ffmpeg.tar.xz
 fi
