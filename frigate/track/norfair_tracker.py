@@ -240,10 +240,17 @@ class NorfairTracker(ObjectTracker):
         norfair requires initialization_delay < hit_counter_max, so overrides are
         clamped to max_disappeared - 1.
         """
-        value = self.detect_config.min_initialized_objects.get(
-            obj_type, self.detect_config.min_initialized
-        )
-        return min(value, self.detect_config.max_disappeared - 1)
+        # FrigateConfig fills both camera-level values (from detect fps) before any
+        # tracker exists; None here would already have failed at `None - 1`.
+        camera_min = self.detect_config.min_initialized
+        max_disappeared = self.detect_config.max_disappeared
+        if camera_min is None or max_disappeared is None:
+            raise ValueError(
+                "detect.min_initialized and detect.max_disappeared must be set "
+                "(FrigateConfig fills them from detect.fps)"
+            )
+        value = self.detect_config.min_initialized_objects.get(obj_type, camera_min)
+        return min(value, max_disappeared - 1)
 
     def _create_tracker(self, obj_type: str, tracker_config: dict[str, Any]) -> Tracker:
         """Helper function to create a tracker with given configuration."""
