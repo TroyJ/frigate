@@ -12,6 +12,18 @@ ARG SLIM_BASE=debian:12-slim
 # A hook that allows us to inject commands right after the base images
 ARG BASE_HOOK=
 
+# Optional runtimes in the shared `deps` image. The defaults install everything, as
+# upstream does; docker/rpi/rpi.hcl turns off what the Raspberry Pi image never uses.
+#   INSTALL_HAILO           Hailo runtime and Python wheel (hailo8l detector)
+#   INSTALL_MEMRYX          MemryX runtime (memryx detector)
+#   INSTALL_GENERIC_FFMPEG  the generic ffmpeg 5.0 and 7.0 builds in /usr/lib/ffmpeg
+#   OPENVINO_MODEL          "include" or "skip": the converted SSDLite model in
+#                           /openvino-model (openvino detector's default model)
+ARG INSTALL_HAILO=true
+ARG INSTALL_MEMRYX=true
+ARG INSTALL_GENERIC_FFMPEG=true
+ARG OPENVINO_MODEL=include
+
 FROM ${BASE_IMAGE} AS base
 ARG PIP_BREAK_SYSTEM_PACKAGES
 ARG BASE_HOOK
@@ -123,6 +135,18 @@ RUN /bin/mkdir -p '/usr/local/lib' && \
     /usr/bin/install -c -m 644 libusb-1.0.pc '/usr/local/lib/pkgconfig' && \
     ldconfig
 
+# OpenVino model, or nothing (OPENVINO_MODEL=skip: ov-converter is then never built)
+FROM wget AS openvino-model-include
+COPY --from=ov-converter /models/ssdlite_mobilenet_v2.xml openvino-model/
+COPY --from=ov-converter /models/ssdlite_mobilenet_v2.bin openvino-model/
+RUN wget -q https://github.com/openvinotoolkit/open_model_zoo/raw/master/data/dataset_classes/coco_91cl_bkgr.txt -O openvino-model/coco_91cl_bkgr.txt && \
+    sed -i 's/truck/car/g' openvino-model/coco_91cl_bkgr.txt
+
+FROM scratch AS openvino-model-skip
+WORKDIR /rootfs
+
+FROM openvino-model-${OPENVINO_MODEL} AS openvino-model
+
 FROM wget AS models
 
 # Get model and labels
@@ -130,10 +154,7 @@ RUN wget -qO edgetpu_model.tflite https://github.com/google-coral/test_data/raw/
 RUN wget -qO cpu_model.tflite https://github.com/google-coral/test_data/raw/release-frogfish/ssdlite_mobiledet_coco_qat_postprocess.tflite
 COPY labelmap.txt .
 # Copy OpenVino model
-COPY --from=ov-converter /models/ssdlite_mobilenet_v2.xml openvino-model/
-COPY --from=ov-converter /models/ssdlite_mobilenet_v2.bin openvino-model/
-RUN wget -q https://github.com/openvinotoolkit/open_model_zoo/raw/master/data/dataset_classes/coco_91cl_bkgr.txt -O openvino-model/coco_91cl_bkgr.txt && \
-    sed -i 's/truck/car/g' openvino-model/coco_91cl_bkgr.txt
+COPY --from=openvino-model /rootfs/ ./
 # Get Audio Model and labels
 RUN wget -qO - https://www.kaggle.com/api/v1/models/google/yamnet/tfLite/classification-tflite/1/download | tar xvz && mv 1.tflite cpu_audio_model.tflite
 COPY audio-labelmap.txt .
@@ -193,8 +214,10 @@ RUN pip3 wheel --wheel-dir=/wheels -r /requirements-wheels.txt && \
     fi
 
 # Install HailoRT & Wheels
+# (the Hailo archive is the only thing that fills /rootfs here, which deps-rootfs copies)
+ARG INSTALL_HAILO
 RUN --mount=type=bind,source=docker/main/install_hailort.sh,target=/deps/install_hailort.sh \
-    /deps/install_hailort.sh
+    if [ "$INSTALL_HAILO" = "true" ]; then /deps/install_hailort.sh; else mkdir -p /rootfs; fi
 
 # Collect deps in a single layer
 FROM scratch AS deps-rootfs
@@ -253,6 +276,7 @@ ENV GLOG_logtostderr=0
 ENV PATH="/usr/local/go2rtc/bin:/usr/local/tempio/bin:/usr/local/nginx/sbin:${PATH}"
 
 # Install dependencies
+ARG INSTALL_GENERIC_FFMPEG
 RUN --mount=type=bind,source=docker/main/install_deps.sh,target=/deps/install_deps.sh \
     /deps/install_deps.sh
 
@@ -267,8 +291,9 @@ RUN --mount=type=bind,from=wheels,source=/wheels,target=/deps/wheels \
     pip3 install -U /deps/wheels/*.whl
 
 # Install MemryX runtime (requires libgomp (OpenMP) in the final docker image)
+ARG INSTALL_MEMRYX
 RUN --mount=type=bind,source=docker/main/install_memryx.sh,target=/deps/install_memryx.sh \
-    bash -c "bash /deps/install_memryx.sh"
+    if [ "$INSTALL_MEMRYX" = "true" ]; then bash -c "bash /deps/install_memryx.sh"; fi
 
 COPY --from=deps-rootfs / /
 

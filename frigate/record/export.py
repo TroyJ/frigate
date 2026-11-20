@@ -12,6 +12,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+import cv2
+import numpy as np
 from peewee import DoesNotExist
 
 from frigate.config import FfmpegConfig, FrigateConfig
@@ -34,6 +36,10 @@ logger = logging.getLogger(__name__)
 
 
 TIMELAPSE_DATA_INPUT_ARGS = "-an -skip_frame nokey"
+
+# The generic ffmpeg build, which has libwebp. The Raspberry Pi image built with
+# INSTALL_GENERIC_FFMPEG=false has no such build, and its own ffmpeg has no libwebp.
+GENERIC_FFMPEG_PATH = "/usr/lib/ffmpeg/7.0/bin/ffmpeg"
 
 
 def lower_priority():
@@ -126,30 +132,66 @@ class RecordingExporter(threading.Thread):
             diff = self.start_time - preview.start_time
             minutes = int(diff / 60)
             seconds = int(diff % 60)
-            ffmpeg_cmd = [
-                "/usr/lib/ffmpeg/7.0/bin/ffmpeg",  # hardcode path for exports thumbnail due to missing libwebp support
-                "-hide_banner",
-                "-loglevel",
-                "warning",
-                "-ss",
-                f"00:{minutes}:{seconds}",
-                "-i",
-                preview.path,
-                "-frames",
-                "1",
-                "-c:v",
-                "libwebp",
-                thumb_path,
-            ]
+            if os.path.exists(GENERIC_FFMPEG_PATH):
+                ffmpeg_cmd = [
+                    GENERIC_FFMPEG_PATH,  # hardcode path for exports thumbnail due to missing libwebp support
+                    "-hide_banner",
+                    "-loglevel",
+                    "warning",
+                    "-ss",
+                    f"00:{minutes}:{seconds}",
+                    "-i",
+                    preview.path,
+                    "-frames",
+                    "1",
+                    "-c:v",
+                    "libwebp",
+                    thumb_path,
+                ]
 
-            process = sp.run(
-                ffmpeg_cmd,
-                capture_output=True,
-            )
+                process = sp.run(
+                    ffmpeg_cmd,
+                    capture_output=True,
+                )
 
-            if process.returncode != 0:
-                logger.error(process.stderr)
-                return ""
+                if process.returncode != 0:
+                    logger.error(process.stderr)
+                    return ""
+            else:
+                # No generic ffmpeg (trimmed Raspberry Pi image): take the frame as
+                # PNG from the image's own ffmpeg and write the webp with OpenCV.
+                process = sp.run(
+                    [
+                        self.config.ffmpeg.ffmpeg_path,
+                        "-hide_banner",
+                        "-loglevel",
+                        "warning",
+                        "-ss",
+                        f"00:{minutes}:{seconds}",
+                        "-i",
+                        preview.path,
+                        "-frames:v",
+                        "1",
+                        "-c:v",
+                        "png",
+                        "-f",
+                        "image2pipe",
+                        "-",
+                    ],
+                    capture_output=True,
+                )
+
+                if process.returncode != 0 or not process.stdout:
+                    logger.error(process.stderr)
+                    return ""
+
+                frame = cv2.imdecode(
+                    np.frombuffer(process.stdout, np.uint8), cv2.IMREAD_COLOR
+                )
+
+                if frame is None or not cv2.imwrite(thumb_path, frame):
+                    logger.error(f"Unable to write export thumbnail {thumb_path}")
+                    return ""
 
         else:
             # need to generate from existing images

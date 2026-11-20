@@ -1,0 +1,42 @@
+name: Pi image check
+
+# Builds the Raspberry Pi image (docker/rpi/rpi.hcl, target rpi) on a GitHub Arm runner,
+# loads it into the runner's Docker and runs docker/rpi/smoke_test.sh against it: the
+# trimmed runtimes are gone, what the Pi needs is there, Frigate starts with the CPU
+# detector on a synthetic camera, /api/version and /api/stats answer, no import errors.
+# Pushes nothing. Started by hand only (Actions tab, or `gh workflow run pi-image-check.yml
+# --ref <branch>`).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pi_image_check:
+    runs-on: ubuntu-22.04-arm
+    name: Build and smoke-test the Pi image
+    timeout-minutes: 300
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Write version files
+        run: make version
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build the Pi image
+        uses: docker/bake-action@v6
+        with:
+          source: .
+          files: docker/rpi/rpi.hcl
+          targets: rpi
+          load: true
+          set: |
+            rpi.tags=frigate:pi-check
+            *.cache-from=type=gha,scope=pi-image-check
+            *.cache-to=type=gha,scope=pi-image-check,mode=max
+      - name: Smoke test
+        run: docker/rpi/smoke_test.sh frigate:pi-check

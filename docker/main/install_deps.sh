@@ -46,7 +46,7 @@ if [[ "${TARGETARCH}" == "arm64" ]]; then
 fi
 
 # ffmpeg -> amd64
-if [[ "${TARGETARCH}" == "amd64" ]]; then
+if [[ "${TARGETARCH}" == "amd64" && "${INSTALL_GENERIC_FFMPEG:-true}" == "true" ]]; then
     mkdir -p /usr/lib/ffmpeg/5.0
     wget -qO ffmpeg.tar.xz "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2022-07-31-12-37/ffmpeg-n5.1-2-g915ef932a3-linux64-gpl-5.1.tar.xz"
     tar -xf ffmpeg.tar.xz -C /usr/lib/ffmpeg/5.0 --strip-components 1 amd64/bin/ffmpeg amd64/bin/ffprobe
@@ -58,7 +58,7 @@ if [[ "${TARGETARCH}" == "amd64" ]]; then
 fi
 
 # ffmpeg -> arm64
-if [[ "${TARGETARCH}" == "arm64" ]]; then
+if [[ "${TARGETARCH}" == "arm64" && "${INSTALL_GENERIC_FFMPEG:-true}" == "true" ]]; then
     mkdir -p /usr/lib/ffmpeg/5.0
     wget -qO ffmpeg.tar.xz "https://github.com/NickM-27/FFmpeg-Builds/releases/download/autobuild-2022-07-31-12-37/ffmpeg-n5.1-2-g915ef932a3-linuxarm64-gpl-5.1.tar.xz"
     tar -xf ffmpeg.tar.xz -C /usr/lib/ffmpeg/5.0 --strip-components 1 arm64/bin/ffmpeg arm64/bin/ffprobe

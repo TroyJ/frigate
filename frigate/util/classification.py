@@ -15,6 +15,7 @@ from frigate.comms.inter_process import InterProcessRequestor
 from frigate.config import FfmpegConfig
 from frigate.const import (
     CLIPS_DIR,
+    DEFAULT_FFMPEG_VERSION,
     MODEL_CACHE_DIR,
     PROCESS_PRIORITY_LOW,
     UPDATE_MODEL_STATE,
@@ -26,6 +27,14 @@ from frigate.util.downloader import ModelDownloader
 from frigate.util.file import get_event_thumbnail_bytes
 from frigate.util.image import get_image_from_recording
 from frigate.util.process import FrigateProcess
+
+# The generic ffmpeg build when the image has one; the trimmed Raspberry Pi image
+# (INSTALL_GENERIC_FFMPEG=false) has only its own build, the image default.
+GENERIC_FFMPEG_DIR = (
+    "/usr/lib/ffmpeg/7.0"
+    if os.path.exists("/usr/lib/ffmpeg/7.0/bin/ffmpeg")
+    else f"/usr/lib/ffmpeg/{DEFAULT_FFMPEG_VERSION}"
+)
 
 BATCH_SIZE = 16
 EPOCHS = 50
@@ -389,7 +398,7 @@ def collect_state_classification_examples(
 
     # Step 3: Extract keyframes from recordings with crops applied
     keyframes = _extract_keyframes(
-        "/usr/lib/ffmpeg/7.0/bin/ffmpeg", timestamps, temp_dir, cameras
+        f"{GENERIC_FFMPEG_DIR}/bin/ffmpeg", timestamps, temp_dir, cameras
     )
 
     # Step 4: Select 24 most visually distinct images (they're already cropped)
@@ -561,7 +570,7 @@ def _extract_keyframes(
         relative_time = timestamp - recording.start_time
 
         try:
-            config = FfmpegConfig(path="/usr/lib/ffmpeg/7.0")
+            config = FfmpegConfig(path=GENERIC_FFMPEG_DIR)
             image_data = get_image_from_recording(
                 config,
                 recording.path,
