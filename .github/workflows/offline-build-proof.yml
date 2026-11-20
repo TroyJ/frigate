@@ -1,0 +1,96 @@
+name: Offline build proof
+
+# Proves the Raspberry Pi image and the Arm test devcontainer build with the network
+# closed to everything except our copies: TroyJ's release files on github.com, our base
+# images on ghcr.io, Debian's dated archive (snapshot.debian.org) and the npm registry.
+# The block is .github/scripts/egress-allowlist.sh (dnsmasq + ipset + iptables on the
+# runner; its header says exactly what is blocked and what is not). Every build runs
+# without cache, so every download happens. A connection the block rejects, or a
+# container looking up a name outside the allowlist, during a build fails the job.
+# Afterwards each job lists every github.com repository the build log shows was fetched
+# from, and fails if any is not TroyJ's.
+#
+# Runs on a push to a deps/* branch, or by hand once on the default branch.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "deps/**"
+
+permissions:
+  contents: read
+
+jobs:
+  pi_image:
+    name: Pi image, network blocked
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 300
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Write version files
+        run: make version
+      # The BuildKit builder image (moby/buildkit) is CI tooling, fetched before the block.
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Close the network
+        run: sudo .github/scripts/egress-allowlist.sh start
+      - name: Build the Pi image (no cache)
+        run: |
+          set -o pipefail
+          docker buildx bake --file docker/rpi/rpi.hcl --no-cache --load --progress=plain \
+            --set rpi.tags=frigate:proof rpi 2>&1 | tee build.log
+      - name: Egress during the build
+        if: always()
+        run: sudo .github/scripts/egress-allowlist.sh report "Pi image build" --fail
+      - name: github.com repositories fetched from (build log)
+        if: always()
+        run: .github/scripts/github-owners.sh build.log
+      - name: Smoke test
+        run: docker/rpi/smoke_test.sh frigate:proof
+      - name: Egress while Frigate ran (reported, not a build failure)
+        if: always()
+        run: sudo .github/scripts/egress-allowlist.sh report "Frigate running (smoke test)"
+
+  test_devcontainer:
+    name: Test devcontainer, network blocked
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 300
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20.x
+      - name: Install devcontainer cli
+        run: npm install --global @devcontainers/cli@0.90.0
+      - name: Close the network
+        run: sudo .github/scripts/egress-allowlist.sh start
+      - name: Build devcontainer (no cache)
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: |
+          set -o pipefail
+          devcontainer build --workspace-folder . --no-cache 2>&1 | tee build.log
+      - name: Start devcontainer
+        run: |
+          set -o pipefail
+          devcontainer up --workspace-folder . 2>&1 | tee up.log
+      - name: Egress during build and start
+        if: always()
+        run: sudo .github/scripts/egress-allowlist.sh report "devcontainer build and start" --fail
+      - name: github.com repositories fetched from (build log)
+        if: always()
+        run: .github/scripts/github-owners.sh build.log up.log
+      - name: Run mypy in devcontainer
+        run: devcontainer exec --workspace-folder . bash -lc "python3 -u -m mypy --config-file frigate/mypy.ini frigate"
+      - name: Run unit tests in devcontainer
+        run: devcontainer exec --workspace-folder . bash -lc "python3 -u -m unittest"
+      - name: Egress during the tests (reported, not a build failure)
+        if: always()
+        run: sudo .github/scripts/egress-allowlist.sh report "unit tests"
