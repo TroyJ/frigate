@@ -18,7 +18,19 @@ set -euo pipefail
 IMAGE="${1:?usage: smoke_test.sh IMAGE}"
 NAME="frigate-pi-smoke"
 WORK="$(mktemp -d)"
-trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$WORK"' EXIT
+# Cleanup keeps the test's own exit status: a cleanup failure is reported but can
+# neither fail a passing test nor pass a failing one. Frigate runs as root in the
+# container, so the files it wrote under $WORK are root's; remove them from inside
+# the image, then the (now empty) directory as ourselves.
+cleanup() {
+  local status=$?
+  set +e
+  docker rm -f "$NAME" >/dev/null 2>&1
+  docker run --rm --entrypoint /bin/rm -v "$WORK:/work" "$IMAGE" -rf /work/config /work/media >/dev/null 2>&1
+  rm -rf "$WORK" 2>/dev/null || echo "warning: could not remove $WORK (test result unaffected)" >&2
+  exit "$status"
+}
+trap cleanup EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 inimg() { docker run --rm --entrypoint /bin/bash "$IMAGE" -c "$1"; }
