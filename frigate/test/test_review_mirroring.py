@@ -39,7 +39,13 @@ def make_maintainer(cameras):
 
 def segment(camera="wide", severity=SeverityEnum.alert, start=1000.0):
     return PendingReviewSegment(
-        camera, start, severity, {"obj1": "person"}, sub_labels={}, zones=[], audio=set()
+        camera,
+        start,
+        severity,
+        {"obj1": "person"},
+        sub_labels={},
+        zones=[],
+        audio=set(),
     )
 
 

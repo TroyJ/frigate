@@ -243,7 +243,7 @@ class NorfairTracker(ObjectTracker):
         value = self.detect_config.min_initialized_objects.get(
             obj_type, self.detect_config.min_initialized
         )
-        return min(value, self.detect_config.max_disappeared - 1)
+        return min(value, self.detect_config.max_disappeared - 1)  # type: ignore[type-var,return-value,operator]
 
     def _create_tracker(self, obj_type: str, tracker_config: dict[str, Any]) -> Tracker:
         """Helper function to create a tracker with given configuration."""
