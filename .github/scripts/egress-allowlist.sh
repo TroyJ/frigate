@@ -9,14 +9,17 @@
 #   - Every Docker container (build steps, BuildKit itself, the devcontainer, the MQTT
 #     broker): may connect only to the addresses of the allowed host names, as
 #     resolved through our resolver. Everything else is rejected (iptables DOCKER-USER).
-#   - Every process running as root on the runner (dockerd pulling images, containerd,
-#     sudo): the same allowlist (iptables OUTPUT, owner uid 0).
-#   - The runner's own user (the Actions runner, node, the devcontainer CLI) is not
-#     blocked, or the job could not report back to GitHub; its DNS lookups are logged
-#     and listed by `report`, so anything unexpected it fetched is still visible.
+#   - The Docker and containerd daemons on the runner (they pull every image): the same
+#     allowlist (iptables OUTPUT, matched by their systemd cgroups docker.service and
+#     containerd.service).
+#   - The runner's own processes (the Actions runner, node, the devcontainer CLI, and
+#     system services: the first run showed GitHub's runner agent and Ubuntu's snapd
+#     connecting out as root) are not blocked, or the job could not report back to
+#     GitHub; their DNS lookups are logged and listed by `report`, so anything unexpected
+#     they fetched is still visible.
 # How: dnsmasq answers every DNS query on the runner and for Docker, and puts the
 # addresses of the allowed names (and their subdomains) into an ipset; iptables
-# accepts only those addresses. IPv6 is rejected for containers and root.
+# accepts only those addresses. IPv6 is rejected for containers and the two daemons.
 #
 # Allowed: github.com (release files of TroyJ/frigate-build-deps; the redirect goes to
 # release-assets.githubusercontent.com or objects.githubusercontent.com), ghcr.io and
@@ -27,7 +30,7 @@
 # also lists every github.com URL the build fetched, from the build log (see the workflow).
 #
 # `report LABEL` prints what was rejected and which names were looked up since the last
-# report; with --fail it exits 1 if a container or root process was rejected or a
+# report; with --fail it exits 1 if a container or one of the two daemons was rejected or a
 # container looked up a name outside the allowlist.
 set -euo pipefail
 
@@ -104,17 +107,15 @@ EOF
   iptables -A EGRESS-ROOT -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
   iptables -A EGRESS-ROOT -d 172.16.0.0/12 -j RETURN
   iptables -A EGRESS-ROOT -d 192.168.0.0/16 -j RETURN
-  iptables -A EGRESS-ROOT -d 169.254.0.0/16 -j RETURN   # the cloud's instance metadata
-  # Azure's platform endpoint (WireServer): the runner VM's own agent reports to it as
-  # root; seen rejected on the first run (ports 80 and 32526). Not build traffic.
-  iptables -A EGRESS-ROOT -d 168.63.129.16 -j RETURN
   iptables -A EGRESS-ROOT -m set --match-set egress-allow dst -j RETURN
-  iptables -A EGRESS-ROOT -j LOG --log-prefix "EGRESS-BLOCK root " --log-uid
+  iptables -A EGRESS-ROOT -j LOG --log-prefix "EGRESS-BLOCK daemon " --log-uid
   iptables -A EGRESS-ROOT -j REJECT
-  iptables -I OUTPUT 1 -m owner --uid-owner 0 -j EGRESS-ROOT
-  # IPv6: containers and root get none
+  for unit in docker.service containerd.service; do
+    iptables -I OUTPUT 1 -m cgroup --path "system.slice/${unit}" -j EGRESS-ROOT
+    ip6tables -I OUTPUT 1 -m cgroup --path "system.slice/${unit}" ! -o lo -j REJECT || true
+  done
+  # IPv6: containers get none
   ip6tables -I FORWARD 1 -j REJECT || true
-  ip6tables -I OUTPUT 1 -m owner --uid-owner 0 ! -o lo -j REJECT || true
 
   echo 0 > "${STATE}/log.pos"
   echo 0 > "${STATE}/kern.pos"
@@ -127,7 +128,10 @@ EOF
        bash -c 'exec 3<>/dev/tcp/snapshot.debian.org/80'; then
     echo "egress allowlist NOT working: a container could not reach snapshot.debian.org" >&2; exit 1
   fi
-  echo "egress block on: containers and root may reach only: ${ALLOWED[*]}"
+  if docker pull -q docker.io/library/hello-world:latest >/dev/null 2>&1; then
+    echo "egress block NOT working: dockerd pulled from Docker Hub" >&2; exit 1
+  fi
+  echo "egress block on: containers, dockerd and containerd may reach only: ${ALLOWED[*]}"
   report "self-test" >/dev/null
 }
 
