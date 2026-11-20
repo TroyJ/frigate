@@ -183,6 +183,13 @@ class TimelineProcessor(threading.Thread):
             timeline_entry[Timeline.class_type] = "gone"
             self.insert_or_save(timeline_entry, prev_event_data, event_data)
 
+            # Drop the cached entries of a tracked object that ended without ever being
+            # saved as an event (false positive, never moved, no alert/detection, ...).
+            # Without this every such object leaves its list in pre_event_cache for the
+            # life of the main process: an unbounded leak (fork backport of upstream
+            # blakeblackshear/frigate e37041c8, PR #24510, first released in 0.18.0).
+            self.pre_event_cache.pop(event_id, None)
+
     def handle_api_entry(
         self,
         camera: str,
