@@ -266,7 +266,13 @@ class FrigateApp:
             self.config.database.path,
             pragmas={
                 "auto_vacuum": "FULL",  # Does not defragment database
-                "cache_size": -512 * 1000,  # 512MB of cache,
+                # fork: 32 MB, not upstream's 512 MB. The cache is per connection and
+                # never shrinks; the main process holds ~10 connections, so 512 MB let
+                # it grow by ~1 GB while recordings were browsed on a Pi 4 (measured
+                # 2026-11-21). Benchmarked on this box's database: every review and
+                # playback read is as fast from 16 MB up; 2 MB is 25-40% slower.
+                "cache_size": -32 * 1000,  # 32MB of cache per connection
+
                 "synchronous": "NORMAL",  # Safe when using WAL https://www.sqlite.org/pragma.html#pragma_synchronous
             },
             timeout=max(
