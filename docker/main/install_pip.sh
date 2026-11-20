@@ -20,18 +20,20 @@ echo "fetching ${GETPIP_URL}"
 wget -q -O "${dir}/get-pip.py" "${GETPIP_URL}"
 echo "${GETPIP_SHA256}  ${dir}/get-pip.py" | sha256sum -c -
 
+# Every wheel of the lock goes into the local folder get-pip installs from (wheel needs
+# packaging, for one); pip, setuptools and wheel are installed at their pinned versions.
 pins=()
-for pkg in pip setuptools wheel; do
-    line="$(grep -E "^${pkg} @ " "${LOCK}")"
-    url="$(echo "${line}" | awk '{print $3}')"
-    sha="$(echo "${line}" | sed -n 's/.*--hash=sha256:\([0-9a-f]*\).*/\1/p')"
+while read -r pkg _ url hash; do
+    sha="${hash#--hash=sha256:}"
     file="${dir}/$(basename "${url}")"
     echo "fetching ${url}"
     wget -q -O "${file}" "${url}"
     echo "${sha}  ${file}" | sha256sum -c -
-    version="$(basename "${url}" | cut -d- -f2)"
-    pins+=("${pkg}==${version}")
-done
+    case "${pkg}" in
+        pip|setuptools|wheel) pins+=("${pkg}==$(basename "${url}" | cut -d- -f2)") ;;
+    esac
+done < <(grep -E '^[A-Za-z0-9_.-]+ @ https://' "${LOCK}")
+[[ "${#pins[@]}" == 3 ]] || { echo "pip, setuptools and wheel must all be in ${LOCK}" >&2; exit 1; }
 
 python3 "${dir}/get-pip.py" --no-index --find-links "${dir}" "${pins[@]}"
 rm -rf "${dir}"
