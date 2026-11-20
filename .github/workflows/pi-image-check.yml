@@ -4,11 +4,15 @@ name: Pi image check
 # loads it into the runner's Docker and runs docker/rpi/smoke_test.sh against it: the
 # trimmed runtimes are gone, what the Pi needs is there, Frigate starts with the CPU
 # detector on a synthetic camera, /api/version and /api/stats answer, no import errors.
-# Pushes nothing. Started by hand only (Actions tab, or `gh workflow run pi-image-check.yml
-# --ref <branch>`).
+# Pushes nothing. Runs on a push to a deps/* branch, or by hand (Actions tab, or `gh workflow
+# run pi-image-check.yml --ref <branch>`, which GitHub allows only once this file is on the
+# default branch).
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - "deps/**"
 
 permissions:
   contents: read
