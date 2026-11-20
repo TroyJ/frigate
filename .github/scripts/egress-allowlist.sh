@@ -105,6 +105,9 @@ EOF
   iptables -A EGRESS-ROOT -d 172.16.0.0/12 -j RETURN
   iptables -A EGRESS-ROOT -d 192.168.0.0/16 -j RETURN
   iptables -A EGRESS-ROOT -d 169.254.0.0/16 -j RETURN   # the cloud's instance metadata
+  # Azure's platform endpoint (WireServer): the runner VM's own agent reports to it as
+  # root; seen rejected on the first run (ports 80 and 32526). Not build traffic.
+  iptables -A EGRESS-ROOT -d 168.63.129.16 -j RETURN
   iptables -A EGRESS-ROOT -m set --match-set egress-allow dst -j RETURN
   iptables -A EGRESS-ROOT -j LOG --log-prefix "EGRESS-BLOCK root " --log-uid
   iptables -A EGRESS-ROOT -j REJECT

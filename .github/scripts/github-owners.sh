@@ -8,8 +8,11 @@
 #   .github/scripts/github-owners.sh build.log [more.log ...]
 set -euo pipefail
 
-owners="$(cat "$@" | grep -oE 'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+' | sort | uniq -c | sort -rn || true)"
-echo "github.com repositories in the log (count, repository):"
+# Download-shaped URLs only (release files, archives, raw files, git clones); links in
+# messages, such as npm's "Changelog: .../releases/tag/...", are not downloads.
+owners="$(cat "$@" | grep -oE 'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(/releases/download/|/archive/|/raw/|\.git)' |
+  grep -oE 'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+' | sed 's/\.git$//' | sort | uniq -c | sort -rn || true)"
+echo "github.com repositories downloaded from, per the log (count, repository):"
 echo "${owners:-  none}"
 others="$(echo "$owners" | awk '{print $2}' | grep -v '^https://github\.com/TroyJ/' | grep -v '^$' || true)"
 if [[ -n "$others" ]]; then
