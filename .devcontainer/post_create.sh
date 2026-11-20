@@ -19,10 +19,7 @@ sudo chown -R "$(id -u):$(id -g)" /media/frigate
 # When started as a service, LIBAVFORMAT_VERSION_MAJOR is defined in the
 # s6 service file. For dev, where frigate is started from an interactive
 # shell, we define it in .bashrc instead.
-# Without an ffmpeg in the image (docker-compose.yml builds the devcontainer with the
-# Raspberry Pi image's switches, so no generic ffmpeg), use 61: the libavformat of the Pi
-# image's ffmpeg 7.1, and of the generic 7.0 build the devcontainer carried before.
-echo 'LIBAVFORMAT_VERSION_MAJOR=$("$(python3 /usr/local/ffmpeg/get_ffmpeg_path.py)" -version 2>/dev/null | grep -Po "libavformat\W+\K\d+"); export LIBAVFORMAT_VERSION_MAJOR="${LIBAVFORMAT_VERSION_MAJOR:-61}"' >> "$HOME/.bashrc"
+echo 'export LIBAVFORMAT_VERSION_MAJOR=$("$(python3 /usr/local/ffmpeg/get_ffmpeg_path.py)" -version | grep -Po "libavformat\W+\K\d+")' >> "$HOME/.bashrc"
 
 make version
 
