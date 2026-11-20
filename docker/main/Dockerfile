@@ -1,4 +1,5 @@
-# syntax=docker/dockerfile:1.6
+# syntax=ghcr.io/troyj/dockerfile:1.6@sha256:ac85f380a63b13dfcefa89046420e1781752bab202122f8f50032edf31be0021
+# (copy of docker/dockerfile:1.6 at the same digest; TroyJ/frigate-build-deps manifest.json)
 
 # https://askubuntu.com/questions/972516/debian-frontend-environment-variable
 ARG DEBIAN_FRONTEND=noninteractive
@@ -6,8 +7,14 @@ ARG DEBIAN_FRONTEND=noninteractive
 # Globally set pip break-system-packages option to avoid having to specify it every time
 ARG PIP_BREAK_SYSTEM_PACKAGES=1
 
-ARG BASE_IMAGE=debian:12
-ARG SLIM_BASE=debian:12-slim
+# Our copies of debian:12 and debian:12-slim, pinned by the originals' digests
+# (TroyJ/frigate-build-deps manifest.json lists every copy and its original).
+ARG BASE_IMAGE=ghcr.io/troyj/debian:12@sha256:268fb24c39bca92d326dd83ea3abebe4a3f7751c804ffef23bb6d857dd343ff8
+ARG SLIM_BASE=ghcr.io/troyj/debian:12-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
+
+# Debian packages come from Debian's dated archive frozen at this time
+# (docker/main/use_debian_snapshot.sh), so every build gets the same versions.
+ARG DEBIAN_SNAPSHOT=20261119T000000Z
 
 # A hook that allows us to inject commands right after the base images
 ARG BASE_HOOK=
@@ -27,17 +34,26 @@ ARG OPENVINO_MODEL=include
 FROM ${BASE_IMAGE} AS base
 ARG PIP_BREAK_SYSTEM_PACKAGES
 ARG BASE_HOOK
+ARG DEBIAN_SNAPSHOT
 
 RUN sh -c "$BASE_HOOK"
+RUN --mount=type=bind,source=docker/main/use_debian_snapshot.sh,target=/deps/use_debian_snapshot.sh \
+    /deps/use_debian_snapshot.sh
 
-FROM --platform=${BUILDPLATFORM} debian:12 AS base_host
+FROM --platform=${BUILDPLATFORM} ghcr.io/troyj/debian:12@sha256:268fb24c39bca92d326dd83ea3abebe4a3f7751c804ffef23bb6d857dd343ff8 AS base_host
 ARG PIP_BREAK_SYSTEM_PACKAGES
+ARG DEBIAN_SNAPSHOT
+RUN --mount=type=bind,source=docker/main/use_debian_snapshot.sh,target=/deps/use_debian_snapshot.sh \
+    /deps/use_debian_snapshot.sh
 
 FROM ${SLIM_BASE} AS slim-base
 ARG PIP_BREAK_SYSTEM_PACKAGES
 ARG BASE_HOOK
+ARG DEBIAN_SNAPSHOT
 
 RUN sh -c "$BASE_HOOK"
+RUN --mount=type=bind,source=docker/main/use_debian_snapshot.sh,target=/deps/use_debian_snapshot.sh \
+    /deps/use_debian_snapshot.sh
 
 FROM slim-base AS wget
 ARG DEBIAN_FRONTEND
@@ -64,10 +80,10 @@ RUN --mount=type=tmpfs,target=/tmp --mount=type=tmpfs,target=/var/cache/apt \
     --mount=type=cache,target=/root/.ccache \
     /deps/build_sqlite_vec.sh
 
-FROM scratch AS go2rtc
+FROM wget AS go2rtc
 ARG TARGETARCH
-WORKDIR /rootfs/usr/local/go2rtc/bin
-ADD --link --chmod=755 "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.10/go2rtc_linux_${TARGETARCH}" go2rtc
+RUN --mount=type=bind,source=docker/main/install_go2rtc.sh,target=/deps/install_go2rtc.sh \
+    /deps/install_go2rtc.sh
 
 FROM wget AS tempio
 ARG TARGETARCH
@@ -117,7 +133,9 @@ ENV CCACHE_MAXSIZE 2G
 # Build libUSB without udev.  Needed for Openvino NCS2 support
 WORKDIR /opt
 RUN apt-get update && apt-get install -y unzip build-essential automake libtool ccache pkg-config
-RUN --mount=type=cache,target=/root/.ccache wget -q https://github.com/libusb/libusb/archive/v1.0.26.zip -O v1.0.26.zip && \
+# Original: https://github.com/libusb/libusb/archive/v1.0.26.zip
+RUN --mount=type=cache,target=/root/.ccache wget -q https://github.com/TroyJ/frigate-build-deps/releases/download/libusb-v1.0.26/libusb-v1.0.26.zip -O v1.0.26.zip && \
+    echo "4175f942e74f3c34b71d01b107d33e713f9ff47563f49bcc6e8b2534f414dd54  v1.0.26.zip" | sha256sum -c - && \
     unzip v1.0.26.zip && cd libusb-1.0.26 && \
     ./bootstrap.sh && \
     ./configure CC='ccache gcc' CCX='ccache g++' --disable-udev --enable-shared && \
@@ -149,14 +167,21 @@ FROM openvino-model-${OPENVINO_MODEL} AS openvino-model
 
 FROM wget AS models
 
-# Get model and labels
-RUN wget -qO edgetpu_model.tflite https://github.com/google-coral/test_data/raw/release-frogfish/ssdlite_mobiledet_coco_qat_postprocess_edgetpu.tflite
-RUN wget -qO cpu_model.tflite https://github.com/google-coral/test_data/raw/release-frogfish/ssdlite_mobiledet_coco_qat_postprocess.tflite
+# Get model and labels (our copies; originals:
+#   https://github.com/google-coral/test_data/raw/release-frogfish/ssdlite_mobiledet_coco_qat_postprocess_edgetpu.tflite
+#   https://github.com/google-coral/test_data/raw/release-frogfish/ssdlite_mobiledet_coco_qat_postprocess.tflite)
+RUN wget -qO edgetpu_model.tflite https://github.com/TroyJ/frigate-build-deps/releases/download/coral-models-release-frogfish/ssdlite_mobiledet_coco_qat_postprocess_edgetpu.tflite && \
+    echo "4a2be2bbb614e576d56dcb914fa52752bf0f13411512710d355d97faa1b35641  edgetpu_model.tflite" | sha256sum -c -
+RUN wget -qO cpu_model.tflite https://github.com/TroyJ/frigate-build-deps/releases/download/coral-models-release-frogfish/ssdlite_mobiledet_coco_qat_postprocess.tflite && \
+    echo "90bb33a634e041914cc1819aa5df99818e6c396c4d2db952c0fd7a9cffc4724f  cpu_model.tflite" | sha256sum -c -
 COPY labelmap.txt .
 # Copy OpenVino model
 COPY --from=openvino-model /rootfs/ ./
-# Get Audio Model and labels
-RUN wget -qO - https://www.kaggle.com/api/v1/models/google/yamnet/tfLite/classification-tflite/1/download | tar xvz && mv 1.tflite cpu_audio_model.tflite
+# Get Audio Model and labels (our copy; original:
+#   https://www.kaggle.com/api/v1/models/google/yamnet/tfLite/classification-tflite/1/download)
+RUN wget -qO yamnet.tar.gz https://github.com/TroyJ/frigate-build-deps/releases/download/yamnet-tflite-classification-1/yamnet-classification-tflite-1.tar.gz && \
+    echo "1b971b2132760273a5fb8f5dc504e86783b27853bb3135d555ae06f1e1e365f3  yamnet.tar.gz" | sha256sum -c - && \
+    tar xvzf yamnet.tar.gz && rm yamnet.tar.gz && mv 1.tflite cpu_audio_model.tflite
 COPY audio-labelmap.txt .
 
 
@@ -194,21 +219,35 @@ RUN apt-get -qq update \
 
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 
-RUN wget -q https://bootstrap.pypa.io/get-pip.py -O get-pip.py \
-    && sed -i 's/args.append("setuptools")/args.append("setuptools==77.0.3")/' get-pip.py \
-    && python3 get-pip.py "pip"
+# pip, setuptools 77.0.3 and wheel from our copies (was: the latest get-pip.py)
+RUN --mount=type=bind,source=docker/main/install_pip.sh,target=/deps/install_pip.sh \
+    --mount=type=bind,source=docker/main/requirements-build-arm64.lock,target=/deps/requirements-build-arm64.lock \
+    /deps/install_pip.sh /deps/requirements-build-arm64.lock
 
 COPY docker/main/requirements.txt /requirements.txt
 COPY docker/main/requirements-dev.txt /requirements-dev.txt
+COPY docker/main/requirements-wheels.txt /requirements-wheels.txt
+COPY docker/main/requirements-build-arm64.lock docker/main/requirements-wheels-arm64.lock /
 
-RUN pip3 install -r /requirements.txt
+# arm64 (the Raspberry Pi image, the Arm test devcontainer): the exact packages of the
+# lock files, every file one of our copies (TroyJ/frigate-build-deps, built for Debian 12 /
+# CPython 3.11) checked by sha256; nothing is resolved or compiled here, and no package
+# index is read. Other architectures: upstream's lists from PyPI, as before.
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+        pip3 install --no-index --no-deps --require-hashes -r /requirements-build-arm64.lock; \
+    else \
+        pip3 install -r /requirements.txt; \
+    fi
 
 # Build pysqlite3 from source
 COPY docker/main/build_pysqlite3.sh /build_pysqlite3.sh
 RUN /build_pysqlite3.sh
 
-COPY docker/main/requirements-wheels.txt /requirements-wheels.txt
-RUN pip3 wheel --wheel-dir=/wheels -r /requirements-wheels.txt && \
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+        pip3 wheel --no-index --no-deps --require-hashes --wheel-dir=/wheels -r /requirements-wheels-arm64.lock; \
+    else \
+        pip3 wheel --wheel-dir=/wheels -r /requirements-wheels.txt; \
+    fi && \
     if [ "$DEBUG" = "true" ]; then \
         pip3 wheel --wheel-dir=/wheels -r /requirements-dev.txt; \
     fi
@@ -283,12 +322,13 @@ RUN --mount=type=bind,source=docker/main/install_deps.sh,target=/deps/install_de
 ENV DEFAULT_FFMPEG_VERSION="7.0"
 ENV INCLUDED_FFMPEG_VERSIONS="${DEFAULT_FFMPEG_VERSION}:5.0"
 
-RUN wget -q https://bootstrap.pypa.io/get-pip.py -O get-pip.py \
-    && sed -i 's/args.append("setuptools")/args.append("setuptools==77.0.3")/' get-pip.py \
-    && python3 get-pip.py "pip"
+RUN --mount=type=bind,source=docker/main/install_pip.sh,target=/deps/install_pip.sh \
+    --mount=type=bind,source=docker/main/requirements-build-arm64.lock,target=/deps/requirements-build-arm64.lock \
+    /deps/install_pip.sh /deps/requirements-build-arm64.lock
 
+# /wheels holds every package and dependency, so no package index is needed
 RUN --mount=type=bind,from=wheels,source=/wheels,target=/deps/wheels \
-    pip3 install -U /deps/wheels/*.whl
+    pip3 install -U --no-index /deps/wheels/*.whl
 
 # Install MemryX runtime (requires libgomp (OpenMP) in the final docker image)
 ARG INSTALL_MEMRYX
@@ -322,6 +362,7 @@ HEALTHCHECK --start-period=300s --start-interval=5s --interval=15s --timeout=10s
 
 # Frigate deps with Node.js and NPM for devcontainer
 FROM deps AS devcontainer
+ARG TARGETARCH
 
 # Do not start the actual Frigate service on devcontainer as it will be started by VS Code
 # But start a fake service for simulating the logs
@@ -331,22 +372,36 @@ COPY docker/main/fake_frigate_run /etc/s6-overlay/s6-rc.d/frigate/run
 RUN mkdir -p /opt/frigate \
     && ln -svf /workspace/frigate/frigate /opt/frigate/frigate
 
-# Install Node 20
-RUN curl -SLO https://deb.nodesource.com/nsolid_setup_deb.sh && \
-    chmod 500 nsolid_setup_deb.sh && \
-    ./nsolid_setup_deb.sh 20 && \
-    apt-get install nodejs -y \
-    && rm -rf /var/lib/apt/lists/* \
-    && npm install -g npm@10
+RUN apt-get update \
+    && apt-get install make xz-utils -y \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Node 20. arm64: our copy of the official Node.js 20.20.2 build (npm 10.8.2 inside;
+# original https://nodejs.org/dist/v20.20.2/node-v20.20.2-linux-arm64.tar.xz, sha256 as in
+# its SHASUMS256.txt). Other architectures: NodeSource's repository, as before.
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+        wget -qO /tmp/node.tar.xz https://github.com/TroyJ/frigate-build-deps/releases/download/nodejs-v20.20.2/node-v20.20.2-linux-arm64.tar.xz && \
+        echo "73093db209e4e9e09dd7d15a47aeaab1b74833830df03efa5f942a1122c5fa71  /tmp/node.tar.xz" | sha256sum -c - && \
+        tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 && \
+        rm /tmp/node.tar.xz && node --version && npm --version; \
+    else \
+        curl -SLO https://deb.nodesource.com/nsolid_setup_deb.sh && \
+        chmod 500 nsolid_setup_deb.sh && \
+        ./nsolid_setup_deb.sh 20 && \
+        apt-get install nodejs -y \
+        && rm -rf /var/lib/apt/lists/* \
+        && npm install -g npm@10; \
+    fi
 
 WORKDIR /workspace/frigate
 
-RUN apt-get update \
-    && apt-get install make -y \
-    && rm -rf /var/lib/apt/lists/*
-
 RUN --mount=type=bind,source=./docker/main/requirements-dev.txt,target=/workspace/frigate/requirements-dev.txt \
-    pip3 install -r requirements-dev.txt
+    --mount=type=bind,source=./docker/main/requirements-dev-arm64.lock,target=/workspace/frigate/requirements-dev-arm64.lock \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        pip3 install --no-index --no-deps --require-hashes -r requirements-dev-arm64.lock; \
+    else \
+        pip3 install -r requirements-dev.txt; \
+    fi
 
 HEALTHCHECK NONE
 
@@ -355,7 +410,8 @@ CMD ["sleep", "infinity"]
 
 # Frigate web build
 # This should be architecture agnostic, so speed up the build on multiarch by not using QEMU.
-FROM --platform=$BUILDPLATFORM node:20 AS web-build
+# (our copy of node:20 at the original's digest)
+FROM --platform=$BUILDPLATFORM ghcr.io/troyj/node:20@sha256:8f693eaa7e0a8e71560c9a82b55fd54c2ae920a2ba5d2cde28bac7d1c01c9ba5 AS web-build
 
 WORKDIR /work
 COPY web/package.json web/package-lock.json ./

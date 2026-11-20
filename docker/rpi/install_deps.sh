@@ -17,8 +17,9 @@ apt-get -qq install --no-install-recommends -y \
 
 mkdir -p -m 600 /root/.gnupg
 
-# enable non-free repo
-echo "deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware" | tee -a /etc/apt/sources.list
+# enable non-free repo (Debian's dated archive when use_debian_snapshot.sh set one up)
+debian_archive="$(cat /etc/apt/debian-snapshot-base 2>/dev/null || echo http://deb.debian.org/debian)"
+echo "deb ${debian_archive} bookworm main contrib non-free non-free-firmware" | tee -a /etc/apt/sources.list
 apt update
 
 # ffmpeg -> arm64

@@ -4,23 +4,28 @@ set -euxo pipefail
 
 # Every source archive this script downloads: where from, and its sha256.
 # Each archive is checked with `sha256sum -c` before it is unpacked, so the
-# build fails if a file changes or a tag is moved. To fetch from another
-# place (a mirror or our own copy), change only the *_URL line.
+# build fails if a file changes or a tag is moved. Every URL is our copy (a
+# release file of TroyJ/frigate-build-deps); the original is in the comment.
 NGINX_VERSION="1.30.7"
-NGINX_URL="https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+# Original: https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz
+NGINX_URL="https://github.com/TroyJ/frigate-build-deps/releases/download/nginx-${NGINX_VERSION}/nginx-${NGINX_VERSION}.tar.gz"
 NGINX_SHA256="2565b5c837050e958f70fb0f73c48e2bca4542ad349fd356f46fb0c72610bc6e"
 
-# Maintained fork of kaltura/nginx-vod-module (deleted from GitHub in Nov 2026)
+# Maintained fork of kaltura/nginx-vod-module (deleted from GitHub in Nov 2026).
+# Full history (Kaltura's and dio-az's): https://github.com/TroyJ/nginx-vod-module
 VOD_MODULE_VERSION="v1.9.1"
-VOD_MODULE_URL="https://github.com/dio-az/nginx-vod-module/archive/refs/tags/${VOD_MODULE_VERSION}.tar.gz"
+# Original: https://github.com/dio-az/nginx-vod-module/archive/refs/tags/${VOD_MODULE_VERSION}.tar.gz
+VOD_MODULE_URL="https://github.com/TroyJ/frigate-build-deps/releases/download/nginx-vod-module-${VOD_MODULE_VERSION}/nginx-vod-module-${VOD_MODULE_VERSION}.tar.gz"
 VOD_MODULE_SHA256="62870bb0c4001041a459361d9b163a3afe1ec32d06a6b70969826e8ca823c97d"
 
 SET_MISC_MODULE_VERSION="v0.33"
-SET_MISC_MODULE_URL="https://github.com/openresty/set-misc-nginx-module/archive/refs/tags/${SET_MISC_MODULE_VERSION}.tar.gz"
+# Original: https://github.com/openresty/set-misc-nginx-module/archive/refs/tags/${SET_MISC_MODULE_VERSION}.tar.gz
+SET_MISC_MODULE_URL="https://github.com/TroyJ/frigate-build-deps/releases/download/set-misc-nginx-module-${SET_MISC_MODULE_VERSION}/set-misc-nginx-module-${SET_MISC_MODULE_VERSION}.tar.gz"
 SET_MISC_MODULE_SHA256="cd5e2cc834bcfa30149e7511f2b5a2183baf0b70dc091af717a89a64e44a2985"
 
 NGX_DEVEL_KIT_VERSION="v0.3.3"
-NGX_DEVEL_KIT_URL="https://github.com/vision5/ngx_devel_kit/archive/refs/tags/${NGX_DEVEL_KIT_VERSION}.tar.gz"
+# Original: https://github.com/vision5/ngx_devel_kit/archive/refs/tags/${NGX_DEVEL_KIT_VERSION}.tar.gz
+NGX_DEVEL_KIT_URL="https://github.com/TroyJ/frigate-build-deps/releases/download/ngx_devel_kit-${NGX_DEVEL_KIT_VERSION}/ngx_devel_kit-${NGX_DEVEL_KIT_VERSION}.tar.gz"
 NGX_DEVEL_KIT_SHA256="faa2fcd5168b10764d35081356511d5f84db5c526a1aa4b6add2db94b6853b2b"
 
 # fetch_source URL SHA256 DEST: download URL, verify its sha256, unpack it

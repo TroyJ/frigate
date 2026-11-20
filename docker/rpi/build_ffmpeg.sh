@@ -32,20 +32,30 @@
 # RPI_FFMPEG_COMMIT must re-validate it (or confirm the 8.x behaviour, see doc).
 set -euxo pipefail
 
-RPI_FFMPEG_REPO="https://github.com/jc-kynesim/rpi-ffmpeg.git"
-RPI_FFMPEG_BRANCH="test/7.1.2/main"
+# Source: our copy (TroyJ/frigate-build-deps), a `git archive` of the pinned commit,
+# checked by sha256. Original: https://github.com/jc-kynesim/rpi-ffmpeg.git, branch
+# test/7.1.2/main (until this change the build cloned its last 50 commits and checked
+# out the commit). ffmpeg takes its version string from git; an archive has no git, so
+# it is written to VERSION: the string the 50-commit clone gave (git describe).
 RPI_FFMPEG_COMMIT="9e9bbb199ce41f2ed2f87628acc755ca099e3a96"   # 2026-01-29
+RPI_FFMPEG_URL="https://github.com/TroyJ/frigate-build-deps/releases/download/rpi-ffmpeg-9e9bbb1/rpi-ffmpeg-${RPI_FFMPEG_COMMIT}.tar.gz"
+RPI_FFMPEG_SHA256="00e450bb656c91d66de7b3afa1631859a0d45f1a856afe5b7ac0c80c3741943e"
+RPI_FFMPEG_VERSION="pi/7.1.2/rpi_28-1-g9e9bbb1"
 PREFIX="/usr/lib/ffmpeg/rpi"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get -qq update
 apt-get -qq install -y --no-install-recommends \
-    build-essential pkg-config git ca-certificates nasm yasm \
+    build-essential pkg-config git ca-certificates wget nasm yasm \
     libdrm-dev libudev-dev libx264-dev libopus-dev zlib1g-dev libssl-dev libv4l-dev
 
-git clone --depth 50 -b "${RPI_FFMPEG_BRANCH}" "${RPI_FFMPEG_REPO}" /src/rpi-ffmpeg
+mkdir -p /src
+wget -nv -O /src/rpi-ffmpeg.tar.gz "${RPI_FFMPEG_URL}"
+echo "${RPI_FFMPEG_SHA256}  /src/rpi-ffmpeg.tar.gz" | sha256sum -c -
+tar -xzf /src/rpi-ffmpeg.tar.gz -C /src   # unpacks into /src/rpi-ffmpeg/
+rm /src/rpi-ffmpeg.tar.gz
 cd /src/rpi-ffmpeg
-git checkout --detach "${RPI_FFMPEG_COMMIT}"
+echo "${RPI_FFMPEG_VERSION}" > VERSION
 
 # dma_heap name patch (see header). Applied to both allocator name lists.
 grep -q '"/dev/dma_heap/reserved",' libavcodec/v4l2_req_dmabufs.c

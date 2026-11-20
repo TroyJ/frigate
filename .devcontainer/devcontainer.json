@@ -8,7 +8,14 @@
   "overrideCommand": false,
   "remoteUser": "vscode",
   "features": {
-    "ghcr.io/devcontainers/features/common-utils:2": {}
+    // Our copy of ghcr.io/devcontainers/features/common-utils:2 (2.7.1) at its digest.
+    // Oh My Zsh off (it is cloned from its default branch) and no `apt upgrade` (the
+    // image's Debian packages come from the dated archive and stay as built).
+    "ghcr.io/troyj/devcontainer-features/common-utils@sha256:e76a6a8a35d1ad824daad1540725e0ec9f8ed2dc00d2850e990a9830013c7d08": {
+      "installOhMyZsh": false,
+      "installOhMyZshConfig": false,
+      "upgradePackages": false
+    }
     // Uncomment the following lines to use ONNX Runtime with CUDA support
     // "ghcr.io/devcontainers/features/nvidia-cuda:1": {
     //   "installCudnn": true,

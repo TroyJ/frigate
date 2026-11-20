@@ -27,8 +27,14 @@ update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 
 mkdir -p -m 600 /root/.gnupg
 
-# install coral runtime
-wget -q -O /tmp/libedgetpu1-max.deb "https://github.com/feranick/libedgetpu/releases/download/16.0TF2.17.1-1/libedgetpu1-max_16.0tf2.17.1-1.bookworm_${TARGETARCH}.deb"
+# install coral runtime (our copy, checked by sha256; original:
+#   https://github.com/feranick/libedgetpu/releases/download/16.0TF2.17.1-1/libedgetpu1-max_16.0tf2.17.1-1.bookworm_${TARGETARCH}.deb)
+case "${TARGETARCH}" in
+    arm64) edgetpu_sha256="eab8aa4576b4dbf738135d8094f32270b24117f77147d25cbe0f49d0144d85f2" ;;
+    amd64) edgetpu_sha256="63fd00989d29160fa9894e115156a9abe456e88751fc9be89d26e4696200441b" ;;
+esac
+wget -q -O /tmp/libedgetpu1-max.deb "https://github.com/TroyJ/frigate-build-deps/releases/download/libedgetpu-16.0TF2.17.1-1/libedgetpu1-max_16.0tf2.17.1-1.bookworm_${TARGETARCH}.deb"
+echo "${edgetpu_sha256}  /tmp/libedgetpu1-max.deb" | sha256sum -c -
 unset DEBIAN_FRONTEND
 yes | dpkg -i /tmp/libedgetpu1-max.deb && export DEBIAN_FRONTEND=noninteractive
 rm /tmp/libedgetpu1-max.deb
@@ -39,7 +45,9 @@ if [[ "${TARGETARCH}" == "arm64" ]]; then
     if [[ "${BASE_IMAGE}" == *"nvcr.io/nvidia/tensorrt"* ]]; then
         echo "Info: Skipping apt-get commands because BASE_IMAGE includes 'nvcr.io/nvidia/tensorrt' for arm64."
     else
-        echo "deb http://deb.debian.org/debian bookworm-backports main" | tee /etc/apt/sources.list.d/bookworm-backbacks.list
+        # Debian's dated archive when use_debian_snapshot.sh set one up, else deb.debian.org
+        debian_archive="$(cat /etc/apt/debian-snapshot-base 2>/dev/null || echo http://deb.debian.org/debian)"
+        echo "deb ${debian_archive} bookworm-backports main" | tee /etc/apt/sources.list.d/bookworm-backbacks.list
         apt-get -qq update
         apt-get -qq install --no-install-recommends --no-install-suggests -y mesa-teflon-delegate/bookworm-backports
     fi
@@ -143,8 +151,15 @@ apt-get clean autoclean -y
 apt-get autoremove --purge -y
 rm -rf /var/lib/apt/lists/*
 
-# Install yq, for frigate-prepare and go2rtc echo source
+# Install yq, for frigate-prepare and go2rtc echo source (our copy, checked by sha256;
+# original: https://github.com/mikefarah/yq/releases/download/v4.48.2/yq_linux_<arch>)
+yq_arch="$(dpkg --print-architecture)"
+case "${yq_arch}" in
+    arm64) yq_sha256="3c21630fda217239a5b7d718d08f08e02503098230b3abd49195d315a6dcfe45" ;;
+    amd64) yq_sha256="0ffc35320180d4911bc3a772934da508715e08af444cb33d4d43660065e25bcc" ;;
+esac
 curl -fsSL \
-    "https://github.com/mikefarah/yq/releases/download/v4.48.2/yq_linux_$(dpkg --print-architecture)" \
+    "https://github.com/TroyJ/frigate-build-deps/releases/download/yq-v4.48.2/yq_linux_${yq_arch}" \
     --output /usr/local/bin/yq
+echo "${yq_sha256}  /usr/local/bin/yq" | sha256sum -c -
 chmod +x /usr/local/bin/yq

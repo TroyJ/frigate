@@ -84,7 +84,7 @@ jobs:
         with:
           node-version: 20.x
       - name: Install devcontainer cli
-        run: npm install --global @devcontainers/cli
+        run: npm install --global @devcontainers/cli@0.90.0
       - name: Build devcontainer
         env:
           DOCKER_BUILDKIT: "1"
