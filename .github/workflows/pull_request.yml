@@ -71,7 +71,9 @@ jobs:
           ruff check frigate migrations docker *.py
 
   python_tests:
-    runs-on: ubuntu-latest
+    # Arm, like the Raspberry Pi the fork ships to: on x86 the devcontainer build takes
+    # install_deps.sh's amd64 branch (Intel's apt repository and 13 Intel driver packages).
+    runs-on: ubuntu-22.04-arm
     name: Python Tests
     steps:
       - name: Check out code
