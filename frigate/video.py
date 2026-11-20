@@ -117,59 +117,60 @@ def capture_frames(
     frame_rate.start()
     skipped_eps = EventsPerSecond()
     skipped_eps.start()
-    config_subscriber = CameraConfigUpdateSubscriber(
-        None, {config.name: config}, [CameraConfigUpdateEnum.enabled]
-    )
 
+    # fork: no ZMQ subscriber of its own here. Upstream opened a new
+    # CameraConfigUpdateSubscriber (a fresh zmq.Context plus a SUB socket connected to
+    # the main process's config publisher) on every capture-thread start, i.e. on every
+    # ffmpeg restart by the watchdog. That publisher only sends on a config change, and
+    # libzmq does a socket's connection bookkeeping only when that socket is used, so
+    # each connect/disconnect left its session and pipes allocated in the main process
+    # (about 11 KB each, measured) until the next config change: an unreachable camera
+    # restarting ffmpeg every 10 s grew the main process by several MB an hour.
+    # `config` is the CameraWatchdog's own CameraConfig object, whose subscriber keeps
+    # config.enabled current, so reading the attribute is enough.
     def get_enabled_state():
-        """Fetch the latest enabled state from ZMQ."""
-        config_subscriber.check_for_updates()
+        """The enabled state, kept current by the camera's watchdog."""
         return config.enabled
 
-    try:
-        while not stop_event.is_set():
-            if not get_enabled_state():
-                logger.debug(f"Stopping capture thread for disabled {config.name}")
+    while not stop_event.is_set():
+        if not get_enabled_state():
+            logger.debug(f"Stopping capture thread for disabled {config.name}")
+            break
+
+        fps.value = frame_rate.eps()
+        skipped_fps.value = skipped_eps.eps()
+        current_frame.value = datetime.now().timestamp()
+        frame_name = f"{config.name}_frame{frame_index}"
+        frame_buffer = frame_manager.write(frame_name)
+        try:
+            frame_buffer[:] = ffmpeg_process.stdout.read(frame_size)
+        except Exception:
+            # shutdown has been initiated
+            if stop_event.is_set():
                 break
 
-            fps.value = frame_rate.eps()
-            skipped_fps.value = skipped_eps.eps()
-            current_frame.value = datetime.now().timestamp()
-            frame_name = f"{config.name}_frame{frame_index}"
-            frame_buffer = frame_manager.write(frame_name)
-            try:
-                frame_buffer[:] = ffmpeg_process.stdout.read(frame_size)
-            except Exception:
-                # shutdown has been initiated
-                if stop_event.is_set():
-                    break
+            logger.error(f"{config.name}: Unable to read frames from ffmpeg process.")
 
+            if ffmpeg_process.poll() is not None:
                 logger.error(
-                    f"{config.name}: Unable to read frames from ffmpeg process."
+                    f"{config.name}: ffmpeg process is not running. exiting capture thread..."
                 )
+                break
 
-                if ffmpeg_process.poll() is not None:
-                    logger.error(
-                        f"{config.name}: ffmpeg process is not running. exiting capture thread..."
-                    )
-                    break
+            continue
 
-                continue
+        frame_rate.update()
 
-            frame_rate.update()
+        # don't lock the queue to check, just try since it should rarely be full
+        try:
+            # add to the queue
+            frame_queue.put((frame_name, current_frame.value), False)
+            frame_manager.close(frame_name)
+        except queue.Full:
+            # if the queue is full, skip this frame
+            skipped_eps.update()
 
-            # don't lock the queue to check, just try since it should rarely be full
-            try:
-                # add to the queue
-                frame_queue.put((frame_name, current_frame.value), False)
-                frame_manager.close(frame_name)
-            except queue.Full:
-                # if the queue is full, skip this frame
-                skipped_eps.update()
-
-            frame_index = 0 if frame_index == shm_frame_count - 1 else frame_index + 1
-    finally:
-        config_subscriber.stop()
+        frame_index = 0 if frame_index == shm_frame_count - 1 else frame_index + 1
 
 
 class CameraWatchdog(threading.Thread):
